@@ -168,6 +168,9 @@ describe('backend loss preserves real client connections', () => {
         const pidContent = pidResult.content as Array<{ type: string; text: string }>;
         const pid = Number(pidContent[0].text);
         expect(pid).toBeGreaterThan(0);
+        await expect(
+          client.callTool({ name: 'healthy_1mcp_echo' }, undefined, { timeout: deadline }),
+        ).resolves.toMatchObject({ content: [{ text: 'healthy' }] });
         await expect(client.ping({ timeout: deadline })).resolves.toEqual({});
         catalogNotes.length = 0;
         process.kill(pid, 'SIGTERM');
@@ -206,7 +209,18 @@ describe('backend loss preserves real client connections', () => {
           expect(catalogNotes).toEqual([]);
           return;
         }
-        expect(tools.tools.map((tool) => tool.name)).not.toContain('flaky_1mcp_echo');
+        expect(tools.tools.map((tool) => tool.name)).toEqual(
+          ['change', 'echo', 'pid', 'update']
+            .map((name) => `flaky_1mcp_${name}`)
+            .concat(['change', 'echo', 'pid', 'update'].map((name) => `healthy_1mcp_${name}`))
+            .sort(),
+        );
+        await expect(
+          client.callTool({ name: 'flaky_1mcp_echo' }, undefined, { timeout: deadline }),
+        ).resolves.toMatchObject({
+          isError: true,
+          content: [{ type: 'text', text: expect.stringMatching(/temporarily unavailable.*retry/i) }],
+        });
         if (inbound !== 'stdio') return;
         expect(
           (await client.listResources({}, { timeout: deadline })).resources.map((resource) => resource.uri),
@@ -214,9 +228,6 @@ describe('backend loss preserves real client connections', () => {
         expect(
           (await client.listPrompts({}, { timeout: deadline })).prompts.map((prompt) => prompt.name),
         ).not.toContain('flaky_1mcp_greeting');
-        await expect(
-          client.callTool({ name: 'flaky_1mcp_echo' }, undefined, { timeout: deadline }),
-        ).rejects.toBeDefined();
         await expect(client.readResource({ uri: flakyUri }, { timeout: deadline })).rejects.toBeDefined();
         await expect(client.getPrompt({ name: 'flaky_1mcp_greeting' }, { timeout: deadline })).rejects.toBeDefined();
         for (const method of [
@@ -234,6 +245,9 @@ describe('backend loss preserves real client connections', () => {
             async () => {
               const recovered = await client.listTools({}, { timeout: deadline });
               expect(recovered.tools.map((tool) => tool.name)).toContain('flaky_1mcp_echo');
+              await expect(
+                client.callTool({ name: 'flaky_1mcp_echo' }, undefined, { timeout: deadline }),
+              ).resolves.toMatchObject({ content: [{ text: 'flaky' }] });
             },
             { timeout: 10_000, interval: 100 },
           );
