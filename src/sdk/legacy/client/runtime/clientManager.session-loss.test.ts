@@ -71,7 +71,26 @@ const MISSING_HEADER_BODY = JSON.stringify({
   id: null,
 });
 
-type RefusalMode = 'unknownSession' | 'missingHeader';
+/**
+ * The body the TypeScript SDK's example server — and the household TaskMaster
+ * backend copied from it — returns with HTTP 400 for any non-initialize request
+ * whose session ID is not in its table, including one it issued before it
+ * restarted.
+ */
+const NO_VALID_SESSION_BODY = JSON.stringify({
+  jsonrpc: '2.0',
+  error: { code: -32000, message: 'Bad Request: No valid session ID' },
+  id: null,
+});
+
+/**
+ * - `noValidSession`: issues a session on initialize and answers an unknown
+ *   session with 400 `No valid session ID` (the TaskMaster outage).
+ * - `noValidSessionStateless`: never issues a session ID, then answers every
+ *   request with the same 400 — the client holds no session to replace, so a
+ *   reconnect cannot help and must not happen.
+ */
+type RefusalMode = 'unknownSession' | 'missingHeader' | 'noValidSession' | 'noValidSessionStateless';
 
 interface FakeUpstream {
   readonly url: string;
@@ -112,8 +131,12 @@ async function startFakeUpstream(refuseWith: RefusalMode = 'unknownSession'): Pr
 
       if (method === 'initialize') {
         const issued = `sess-${Math.random().toString(16).slice(2)}`;
-        validSessions.add(issued);
-        res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': issued });
+        const headers: Record<string, string> = { 'content-type': 'application/json' };
+        if (refuseWith !== 'noValidSessionStateless') {
+          validSessions.add(issued);
+          headers['mcp-session-id'] = issued;
+        }
+        res.writeHead(200, headers);
         res.end(
           JSON.stringify({
             jsonrpc: '2.0',
@@ -134,12 +157,23 @@ async function startFakeUpstream(refuseWith: RefusalMode = 'unknownSession'): Pr
         return;
       }
 
+      if (refuseWith === 'noValidSessionStateless' && method === 'tools/list') {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(NO_VALID_SESSION_BODY);
+        return;
+      }
+
       const sessionId = req.headers['mcp-session-id'];
       // Only reject requests carrying a session ID it no longer recognises —
       // exactly the condition that produced the outage.
       if (typeof sessionId === 'string' && !validSessions.has(sessionId)) {
-        res.writeHead(404, { 'content-type': 'application/json' });
-        res.end(UNKNOWN_SESSION_BODY);
+        if (refuseWith === 'noValidSession') {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(NO_VALID_SESSION_BODY);
+        } else {
+          res.writeHead(404, { 'content-type': 'application/json' });
+          res.end(UNKNOWN_SESSION_BODY);
+        }
         return;
       }
 
@@ -236,6 +270,51 @@ describe('ClientManager session-loss recovery over a real Streamable HTTP upstre
       // And the new connection really can talk to the upstream again.
       const after = cm.getClients().get('http-upstream')!;
       await expect(requestLegacyOutbound(after, 'tools/list')).resolves.toBeDefined();
+    } finally {
+      await upstream.close();
+    }
+  }, 30_000);
+
+  it('reconnects when a restarted upstream answers its old session with 400 "No valid session ID"', async () => {
+    const upstream = await startFakeUpstream('noValidSession');
+    try {
+      await cm.createSingleClient('http-upstream', makeTransport(upstream.url));
+      const before = cm.getClients().get('http-upstream');
+      expect(before?.status).toBe(ClientStatus.Connected);
+
+      upstream.forgetSessions();
+      await requestLegacyOutbound(before!, 'tools/list').catch(() => undefined);
+
+      await vi.waitFor(
+        () => {
+          const after = cm.getClients().get('http-upstream');
+          expect(after).toBeDefined();
+          expect(after).not.toBe(before);
+          expect(after!.status).toBe(ClientStatus.Connected);
+        },
+        { timeout: 8000 },
+      );
+      expect(upstream.requestLog.filter((m) => m === 'initialize').length).toBeGreaterThanOrEqual(2);
+      const after = cm.getClients().get('http-upstream')!;
+      await expect(requestLegacyOutbound(after, 'tools/list')).resolves.toBeDefined();
+    } finally {
+      await upstream.close();
+    }
+  }, 30_000);
+
+  it('does not reconnect on "No valid session ID" when the client never held a session', async () => {
+    const upstream = await startFakeUpstream('noValidSessionStateless');
+    try {
+      await cm.createSingleClient('http-upstream', makeTransport(upstream.url));
+      const before = cm.getClients().get('http-upstream');
+      expect(before?.status).toBe(ClientStatus.Connected);
+
+      await requestLegacyOutbound(before!, 'tools/list').catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('was lost'));
+      expect(upstream.requestLog.filter((m) => m === 'initialize').length).toBe(1);
+      expect(cm.getClients().get('http-upstream')).toBe(before);
     } finally {
       await upstream.close();
     }

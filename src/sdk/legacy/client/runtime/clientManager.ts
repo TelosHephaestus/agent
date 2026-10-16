@@ -70,6 +70,23 @@ function isSessionLostError(error: unknown): boolean {
   return SESSION_LOST_PATTERN.test(error.message);
 }
 
+// The TypeScript SDK's example Streamable HTTP server (and backends copied
+// from it, e.g. the household TaskMaster MCP) answers *any* non-initialize
+// request whose session ID is absent from its table with a 400 "Bad Request:
+// No valid session ID" -- the same wording for a missing header and for a
+// session it forgot when it restarted. The wording alone is therefore
+// ambiguous; it only means session loss when this client was actually
+// sending a session ID it obtained from that backend.
+const NO_VALID_SESSION_PATTERN = /no valid session id/i;
+
+function isRefusedHeldSessionError(error: unknown, transport: AuthProviderTransport | undefined): boolean {
+  if (!(error instanceof Error) || !NO_VALID_SESSION_PATTERN.test(error.message)) {
+    return false;
+  }
+  const sessionId = (transport as { sessionId?: unknown } | undefined)?.sessionId;
+  return typeof sessionId === 'string' && sessionId.length > 0;
+}
+
 type StdioSupervisionMetadata = NonNullable<AuthProviderTransport['stdioSupervision']>;
 
 function diagnosticServerName(name: string | undefined): string | undefined {
@@ -221,7 +238,11 @@ export class ClientManager extends EventEmitter {
       logger.error('clientManager.client.error.775bd985');
       writeLocalDiagnostic('error', 'backend.client.error', () => ({ serverName: diagnosticServerName(name), error }));
 
-      if (isSessionLostError(safeError)) {
+      const heldTransport = (() => {
+        const info = this.outboundConns.get(name);
+        return info && getLegacyClient(info) === client ? getLegacyTransport(info) : undefined;
+      })();
+      if (isSessionLostError(safeError) || isRefusedHeldSessionError(safeError, heldTransport)) {
         this.recoverFromSessionLoss(name, client);
       }
     };
