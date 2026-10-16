@@ -182,12 +182,17 @@ interface RuntimePaginationState {
 
 interface CapabilityNotificationState {
   connections: Set<OutboundConnections>;
-  forwarders: Map<object, (notification: { method: string; params?: Record<string, unknown> }) => Promise<void>>;
   pumping: boolean;
 }
 
 const runtimeStates = new WeakMap<OutboundConnections, RuntimePaginationState>();
 const notificationStates = new WeakMap<object, CapabilityNotificationState>();
+// Inbound ownership follows the connections map, not a replaced backend adapter.
+type CatalogForwarder = (
+  notification: { method: string; params?: Record<string, unknown> },
+  source: OutboundConnection,
+) => Promise<void>;
+const catalogForwarders = new WeakMap<OutboundConnections, Map<object, CatalogForwarder>>();
 const registeredAdapters = new WeakMap<OutboundConnections, Set<object>>();
 const clientIds = new WeakMap<object, number>();
 const MAX_DISABLED_PAGINATION_PAGES = 1000;
@@ -255,11 +260,11 @@ export function registerCapabilityPaginationNotifications(
   connections: OutboundConnections,
   connection: OutboundConnection,
   forwardingKey?: object,
-  forward?: (notification: { method: string; params?: Record<string, unknown> }) => Promise<void>,
+  forward?: CatalogForwarder,
 ): void {
   let state = notificationStates.get(connection.adapter);
   if (!state) {
-    state = { connections: new Set(), forwarders: new Map(), pumping: false };
+    state = { connections: new Set(), pumping: false };
     notificationStates.set(connection.adapter, state);
     const observedState = state;
     const adapter = connection.adapter;
@@ -285,7 +290,14 @@ export function registerCapabilityPaginationNotifications(
       advanceCapabilityPaginationGeneration(connections, kind);
     }
   }
-  if (forwardingKey && forward) state.forwarders.set(forwardingKey, forward);
+  if (forwardingKey && forward) {
+    let handlers = catalogForwarders.get(connections);
+    if (!handlers) {
+      handlers = new Map();
+      catalogForwarders.set(connections, handlers);
+    }
+    handlers.set(forwardingKey, forward);
+  }
 
   if (!state.pumping) {
     state.pumping = true;
@@ -326,15 +338,18 @@ async function pumpCapabilityNotifications(
         ? { params: event.notification.params as Record<string, unknown> }
         : {}),
     };
-    await Promise.all(Array.from(state.forwarders.values(), (handler) => handler(notification)));
+    for (const connections of state.connections) {
+      if (!Array.from(connections.values()).includes(connection)) continue;
+      await Promise.all(
+        Array.from(catalogForwarders.get(connections)?.values() ?? [], (handler) => handler(notification, connection)),
+      );
+    }
   }
 }
 
 /** Remove one inbound notification forwarder from every connected provider. */
 export function unregisterCapabilityPaginationForwarder(connections: OutboundConnections, forwardingKey: object): void {
-  for (const connection of connections.values()) {
-    notificationStates.get(connection.adapter)?.forwarders.delete(forwardingKey);
-  }
+  catalogForwarders.get(connections)?.delete(forwardingKey);
 }
 
 /** Detach a disposed catalog scope from every adapter it observed, including replaced adapters. */

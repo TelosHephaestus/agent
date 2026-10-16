@@ -82,6 +82,7 @@ describe('server', () => {
       ['client2', { connect: vi.fn() }],
     ]);
     mockClientManager = {
+      on: vi.fn(),
       createClients: vi.fn().mockResolvedValue(mockClients),
       initializeClientsAsync: vi.fn().mockReturnValue(mockClients),
       setInstructionAggregator: vi.fn(),
@@ -99,6 +100,7 @@ describe('server', () => {
       getStatus: vi.fn().mockReturnValue('running'),
       setInstructionAggregator: vi.fn(),
       syncMcpServerLifecycleFromConnectedClients: vi.fn(),
+      notifyBackendCapabilityListsChanged: vi.fn().mockResolvedValue(undefined),
       getTemplateServerManager: vi.fn().mockReturnValue(mockTemplateServerManager),
     };
     vi.mocked(ServerManager.getOrCreateInstance).mockReturnValue(mockServerManager);

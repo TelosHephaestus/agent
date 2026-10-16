@@ -78,6 +78,7 @@ function makeClientManagerMock(createSingleClientImpl?: () => Promise<void>) {
   const transports: Record<string, unknown> = {};
 
   return {
+    on: vi.fn(),
     getClients: vi.fn().mockReturnValue(outboundConns),
     getTransport: vi.fn((name: string) => transports[name]),
     createSingleClient: vi.fn(
@@ -121,6 +122,65 @@ const makeServerConfig = (overrides: Record<string, unknown> = {}) =>
 // ── Test suite ────────────────────────────────────────────────────────────────
 
 describe('McpLoadingManager', () => {
+  it('retains the actual terminal recovery error instead of its connection snapshot', async () => {
+    const cm = makeClientManagerMock();
+    const manager = new McpLoadingManager(cm as never, FAST_CONFIG);
+    const tracker = manager.getStateTracker();
+    tracker.startLoading(['lost']);
+    tracker.updateServerState('lost', LoadingState.Ready);
+    cm._outboundConns.set('lost', { status: 'error', lastError: new Error('snapshot') });
+    cm._transports.lost = makeFakeTransport();
+    const callback = cm.on.mock.calls.find((call) => call[0] === 'session-recovery-settled')?.[1];
+    const error = new NonRetryableClientConnectionError('lost', new Error('incompatible protocol'));
+    callback('lost', { error });
+    expect(tracker.getServerState('lost')?.error).toBe(error);
+    await (manager as unknown as { performBackgroundRetry(): Promise<void> }).performBackgroundRetry();
+    expect(cm.createSingleClient).not.toHaveBeenCalled();
+    manager.shutdown();
+  });
+
+  it.each(['error', 'connected'])(
+    'does not override intentional cancellation after late %s settlement',
+    async (status) => {
+      const pending = makeDeferred();
+      const cm = makeClientManagerMock(() => pending.promise);
+      const manager = new McpLoadingManager(cm as never, FAST_CONFIG);
+      const tracker = manager.getStateTracker();
+      await manager.startAsyncLoading({ lost: makeFakeTransport() } as never);
+      await yieldToEventLoop();
+      manager.cancelServerLoading('lost');
+      await manager.waitForInitialLoading();
+      expect(tracker.getServerState('lost')?.state).toBe(LoadingState.Cancelled);
+      cm._outboundConns.set('lost', { status, lastError: new Error('late outage') });
+      const callback = cm.on.mock.calls.find((call) => call[0] === 'session-recovery-settled')?.[1];
+      callback('lost');
+      expect(tracker.getServerState('lost')?.state).toBe(LoadingState.Cancelled);
+      pending.resolve();
+      manager.shutdown();
+    },
+  );
+
+  it('enrolls only established failed session replacement and permits later failures', async () => {
+    const cm = makeClientManagerMock();
+    const manager = new McpLoadingManager(cm as never, FAST_CONFIG);
+    const tracker = manager.getStateTracker();
+    tracker.startLoading(['lost', 'healthy']);
+    tracker.updateServerState('lost', LoadingState.Ready);
+    tracker.updateServerState('healthy', LoadingState.Ready);
+    cm._outboundConns.set('lost', { status: 'error', lastError: new Error('endpoint unavailable') });
+    const callback = cm.on.mock.calls.find((call) => call[0] === 'session-recovery-settled')?.[1];
+    expect(callback).toBeTypeOf('function');
+    callback('lost');
+    expect(tracker.getServerState('lost')?.state).toBe(LoadingState.Failed);
+    expect(tracker.getServerState('healthy')?.state).toBe(LoadingState.Ready);
+    cm._outboundConns.set('lost', { status: 'connected' });
+    callback('lost');
+    expect(tracker.getServerState('lost')?.state).toBe(LoadingState.Ready);
+    cm._outboundConns.set('lost', { status: 'error' });
+    callback('lost');
+    expect(tracker.getServerState('lost')?.state).toBe(LoadingState.Failed);
+    await manager.shutdown();
+  });
   let clientManager: ReturnType<typeof makeClientManagerMock>;
   let manager: McpLoadingManager;
 

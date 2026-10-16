@@ -174,6 +174,8 @@ async function setupServerAsync(
 
   clientManager.setBackendAvailabilityHandler(async () => {
     await asyncOrchestrator.refreshCapabilities();
+    // A replaced session invalidates catalog ownership even when names are unchanged.
+    await serverManager.notifyBackendCapabilityListsChanged();
     if (lazyLoadingOrchestrator) {
       await lazyLoadingOrchestrator.refreshCapabilities();
     }

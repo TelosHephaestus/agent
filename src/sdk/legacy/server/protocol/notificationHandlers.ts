@@ -79,7 +79,7 @@ export async function setupClientToServerNotifications(
       outboundConns,
       outboundConn,
       inboundConn,
-      withErrorHandling(async (notification) => {
+      withErrorHandling(async (notification, source) => {
         logger.info('notificationHandlers.received.notification.in.client.689f962c');
 
         if (inboundConn.status !== ServerStatus.Connected || !getLegacyInboundServer(inboundConn).transport) {
@@ -87,9 +87,13 @@ export async function setupClientToServerNotifications(
           return;
         }
 
-        enqueueOwnedCatalogNotification(outboundConns, inboundConn, outboundConn, {
+        const current = source as LegacyOutboundConnection;
+        const currentName = Array.from(outboundConns).find(([, candidate]) => candidate === current)?.[0];
+        if (currentName === undefined) return;
+        await setupCatalogCoverage(outboundConns, inboundConn, current);
+        enqueueOwnedCatalogNotification(outboundConns, inboundConn, current, {
           method: notification.method,
-          params: { ...notification.params, server: name },
+          params: { ...notification.params, server: currentName },
         });
       }, `Error handling client notification from ${name}`),
     );

@@ -2,7 +2,8 @@ import { EventEmitter } from 'events';
 
 import { sanitizeRuntimeScopeError } from '@src/config/runtimeScopeEnv.js';
 import { ClientManager } from '@src/core/client/clientManager.js';
-import { MCPServerParams, OutboundConnections } from '@src/core/types/index.js';
+import { SESSION_RECOVERY_SETTLED, type SessionRecoverySettlement } from '@src/core/client/sessionRecoveryEvents.js';
+import { ClientStatus, MCPServerParams, OutboundConnections } from '@src/core/types/index.js';
 import logger, { debugIf } from '@src/logger/logger.js';
 import { createTransports } from '@src/transport/transportFactory.js';
 import { NonRetryableClientConnectionError } from '@src/utils/core/errorTypes.js';
@@ -165,6 +166,21 @@ export class McpLoadingManager extends EventEmitter {
       this.setupBackgroundRetry();
     });
 
+    this.clientManager.on(SESSION_RECOVERY_SETTLED, (name: string, settlement?: SessionRecoverySettlement) => {
+      if (this.isShuttingDown || this.serverOpAbortControllers.has(name)) return;
+      const tracked = this.stateTracker.getServerState(name);
+      if (!tracked || tracked.state === LoadingState.Cancelled) return; // Preserve removal and intentional cancellation.
+      const connection = this.clientManager.getClients().get(name);
+      if (!connection) return;
+      if (connection.status === ClientStatus.Connected) {
+        this.stateTracker.updateServerState(name, LoadingState.Ready);
+        return;
+      }
+      if (connection.status !== ClientStatus.Error) return; // OAuth is not a retryable outage.
+      this.stateTracker.updateServerState(name, LoadingState.Failed, {
+        error: settlement?.error ?? connection.lastError ?? new Error('Session replacement failed'),
+      });
+    });
     this.setMaxListeners(100); // Allow many listeners
   }
 

@@ -1,9 +1,10 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter } from 'events';
 
 import { sanitizeRuntimeScopeError } from '@src/config/runtimeScopeEnv.js';
 import { MCP_SERVER_NAME } from '@src/constants.js';
 import { DEFAULT_MAX_CONCURRENT_LOADS } from '@src/constants/mcp.js';
 import { registerCapabilityPaginationNotifications } from '@src/core/capabilities/capabilityPagination.js';
+import { SESSION_RECOVERY_SETTLED, type SessionRecoverySettlement } from '@src/core/client/sessionRecoveryEvents.js';
 import { InstructionAggregator } from '@src/core/instructions/instructionAggregator.js';
 import { ParallelExecutor } from '@src/core/loading/parallelExecutor.js';
 import { BackendStdioSupervisor, type BackendSupervisionSnapshot } from '@src/core/server/backendStdioSupervisor.js';
@@ -285,6 +286,7 @@ export class ClientManager extends EventEmitter {
       return;
     }
 
+    let recoveryError: Error | undefined;
     void this.createSingleClient(name, freshTransport)
       .then(() => {
         const recovered = this.outboundConns.get(name);
@@ -311,7 +313,8 @@ export class ClientManager extends EventEmitter {
           error: recovered?.lastError,
         }));
       })
-      .catch((_error) => {
+      .catch((_error: unknown) => {
+        recoveryError = sanitizeRuntimeScopeError(_error);
         logger.error('clientManager.failed.to.recover.after.session.loss.501b50bc');
         writeLocalDiagnostic('error', 'backend.session.recovery.failed', () => ({
           serverName: diagnosticServerName(name),
@@ -322,6 +325,13 @@ export class ClientManager extends EventEmitter {
       })
       .finally(() => {
         this.sessionLossRecoveries.delete(name);
+        if (!this.isShuttingDown) {
+          // A concurrent bulk replacement can supersede this attempt. Never attach
+          // the retired attempt's exception to the current connection's settlement.
+          const error = this.transports[name] === freshTransport ? recoveryError : undefined;
+          this.emit(SESSION_RECOVERY_SETTLED, name, { error } satisfies SessionRecoverySettlement);
+          if (this.outboundConns.get(name)?.status === ClientStatus.Connected) this.publishBackendAvailability(name);
+        }
         // Whether recovery succeeded or failed, this dead client/transport is no
         // longer on record for `name` (createSingleClient always replaces it,
         // even with an error-status placeholder) — close it so its underlying

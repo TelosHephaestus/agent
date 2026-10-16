@@ -593,6 +593,28 @@ describe('ClientManager (Integration)', () => {
   });
 
   describe('session loss recovery', () => {
+    it('publishes a settled failed replacement for loading enrollment', async () => {
+      vi.useRealTimers();
+      const originalTransport = {
+        _url: new URL('https://example.com/mcp'),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AuthProviderTransport;
+      Object.setPrototypeOf(originalTransport, StreamableHTTPClientTransport.prototype);
+      const freshTransport = {
+        _url: new URL('https://example.com/mcp'),
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as AuthProviderTransport;
+      Object.setPrototypeOf(freshTransport, StreamableHTTPClientTransport.prototype);
+      vi.spyOn((clientManager as any).transportRecreator, 'recreateForSessionLoss').mockReturnValue(freshTransport);
+      await clientManager.createSingleClient('lost', originalTransport);
+      const settled = vi.fn();
+      clientManager.on('session-recovery-settled', settled);
+      vi.spyOn(clientManager, 'createSingleClient').mockImplementation(async () => {
+        clientManager.getClient('lost').status = ClientStatus.Error;
+      });
+      getLegacyClient(clientManager.getClient('lost')).onerror?.(new Error('Session not found'));
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledWith('lost', { error: undefined }));
+    });
     it('reconnects with a fresh (session-less) transport when the backend reports a lost session', async () => {
       vi.useRealTimers();
 
