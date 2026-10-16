@@ -213,6 +213,7 @@ export function registerToolHandlers(
             timeoutMs: resolved.connection?.requestTimeoutMs,
           };
           writeLocalDiagnostic('info', 'tool.routed', diagnosticRoute);
+
           if (
             resolved.entry.route.origin === 'external' &&
             (!resolved.connection || resolved.connection.status !== ClientStatus.Connected)
@@ -272,6 +273,9 @@ export function registerToolHandlers(
           if (extra?.signal?.aborted) throw new SchemaBoundaryError('schema_evaluation_unavailable', true);
           const { route } = resolved.entry;
           validateOutput.assertCurrent();
+          if (route.origin === 'external' && snapshot.retainedToolNames?.has(request.params.name)) {
+            return unavailableToolResult(route.server);
+          }
           if (route.origin === 'internal') {
             phase = 'internal';
             if (lazyLoadingOrchestrator && route.connectionKey === '\0app.1mcp/meta-tools') {
