@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
+import { isOperatorDisabledTemplateDefinition } from '@src/config/configuredServerTargets.js';
 import { requestLegacyAdapter } from '@src/core/client/legacyAdapterRequest.js';
 import { isSourceToolDisabled } from '@src/core/server/disabledTools.js';
 import { parseTemplateConnectionKey } from '@src/core/server/templateIdentity.js';
@@ -18,6 +19,7 @@ import {
   projectToolSchemas,
   type ToolSchemaContracts,
 } from '@src/core/validation/toolSchemaBoundary.js';
+import { writeLocalDiagnostic } from '@src/logger/localDiagnostics.js';
 import { ErrorCode, OneMcpProtocolError, type Tool } from '@src/sdk/contracts/index.js';
 import { MCPError } from '@src/utils/core/errorTypes.js';
 
@@ -51,6 +53,7 @@ import {
   publishCompleteConfiguredToolTargetSnapshots,
   publishConfiguredToolSnapshot,
 } from './configuredToolSnapshot.js';
+import type { RetainedToolCatalog } from './retainedToolCatalog.js';
 
 /** Only backend replacement is eligible for the aggregate's single collection retry. */
 export class RuntimeCatalogBackendChangedError extends Error {
@@ -69,6 +72,7 @@ const METHODS: Record<CapabilityKind, string> = {
 
 export interface RuntimeCatalogOptions {
   signal?: AbortSignal;
+  retention?: { store: RetainedToolCatalog; serverConfigs: Record<string, MCPServerParams> };
   serverConfigs?: Record<string, MCPServerParams>;
   internalTools?: readonly unknown[];
   internalResources?: readonly unknown[];
@@ -91,6 +95,7 @@ interface SourcePages {
   server: string;
   pages: Map<string | undefined, CapabilityPage<unknown>>;
   error?: unknown;
+  incomplete?: boolean;
 }
 
 export interface PreparedToolCall {
@@ -100,6 +105,7 @@ export interface PreparedToolCall {
 
 export interface RuntimeCapabilitySnapshot {
   readonly generation: CatalogGeneration;
+  readonly retainedToolNames: ReadonlySet<string>;
   /** Synchronous completeness facts from this captured observation, independent of pagination walks. */
   readonly capabilityMeta?: Partial<Record<CapabilityKind, Record<string, unknown>>>;
   prepareToolCall(identity: string, args: unknown, signal?: AbortSignal): Promise<PreparedToolCall>;
@@ -258,6 +264,7 @@ async function collectRuntimeCapabilityCatalog(
   options: RuntimeCatalogOptions,
 ): Promise<RuntimeCapabilitySnapshot> {
   options = { ...options, serverConfigs: structuredClone(options.serverConfigs ?? {}) };
+  options.retention?.store.reconcile(options.retention.serverConfigs);
   let state = states.get(connections);
   if (!state) {
     state = { nextId: 1, scopes: new Map() };
@@ -397,6 +404,10 @@ async function collectRuntimeCapabilityCatalog(
                 { timeoutMs: connection.requestTimeoutMs, signal },
               );
               if (!Array.isArray(result[kind])) throw new Error(`Invalid ${kind} list result`);
+              const meta = result._meta as Record<string, unknown> | undefined;
+              const pagination = meta?.['app.1mcp/capability-pagination'] as
+                { partial?: boolean; complete?: boolean } | undefined;
+              if (pagination?.partial || pagination?.complete === false) provider.incomplete = true;
               const items = result[kind] as unknown[];
               capturedItems += items.length;
               capturedBytes += Buffer.byteLength(JSON.stringify(items));
@@ -496,6 +507,44 @@ async function collectRuntimeCapabilityCatalog(
     if (disconnected.has(sourcePages[index].key)) sourcePages.splice(index, 1);
   }
   assertCurrent();
+  // Retain only fully terminated, successful raw upstream walks. Never persist public names.
+  const completeStaticLists = new Map<string, { tools: Tool[]; pageSizes: number[] }>();
+  for (const provider of sourcePages) {
+    if (provider.kind !== 'tools' || provider.error || provider.incomplete) continue;
+    if (!options.retention?.serverConfigs[provider.key]) continue;
+    completeStaticLists.set(provider.key, {
+      tools: [...provider.pages.values()].flatMap((page) => page.items) as Tool[],
+      pageSizes: [...provider.pages.values()].map((page) => page.items.length),
+    });
+  }
+  const retainedKeys = new Set<string>();
+  if (options.retention) {
+    for (const [server, config] of Object.entries(options.retention.serverConfigs)) {
+      if (isOperatorDisabledTemplateDefinition(config)) continue;
+      if (visibility && !visibility.serverCandidates.has(server)) continue;
+      // Even a connected backend can still be enumerating or fail on a later page.
+      const provider = sourcePages.find((page) => page.kind === 'tools' && page.key === server);
+      if (provider && !provider.error && !provider.incomplete) continue;
+      const tools = options.retention.store.read(server);
+      if (!tools) continue;
+      for (let index = sources.length - 1; index >= 0; index--) {
+        if (sources[index].kind === 'tools' && sources[index].connectionKey === server) sources.splice(index, 1);
+      }
+      if (provider) sourcePages.splice(sourcePages.indexOf(provider), 1);
+      const pageSizes = options.retention.store.readPageSizes(server) ?? [tools.length];
+      const pages = new Map<string | undefined, CapabilityPage<unknown>>();
+      let offset = 0;
+      for (const [index, size] of pageSizes.entries()) {
+        const cursor = index === 0 ? undefined : `retained-page-${index}`;
+        const nextCursor = index + 1 < pageSizes.length ? `retained-page-${index + 1}` : undefined;
+        pages.set(cursor, { items: tools.slice(offset, offset + size), nextCursor });
+        offset += size;
+      }
+      sourcePages.push({ kind: 'tools', key: server, server, pages });
+      for (const object of tools) sources.push({ kind: 'tools', server, connectionKey: server, object });
+      retainedKeys.add(server);
+    }
+  }
   sources.sort(
     (left, right) => left.kind.localeCompare(right.kind) || left.connectionKey.localeCompare(right.connectionKey),
   );
@@ -552,7 +601,9 @@ async function collectRuntimeCapabilityCatalog(
         await admitToolSchemas(object, {
           routeKey,
           generation: String(started),
-          sourceRevision: captured.get(source.connectionKey)?.adapter.protocolRevision,
+          sourceRevision: retainedKeys.has(source.connectionKey)
+            ? options.retention?.store.readProtocolRevision(source.connectionKey)
+            : captured.get(source.connectionKey)?.adapter.protocolRevision,
           signal,
         }),
       );
@@ -582,6 +633,7 @@ async function collectRuntimeCapabilityCatalog(
   signal?.throwIfAborted();
   const generation = buildCatalogGeneration(started, sources, { allowTemplateInstances: visibility === undefined });
   const keys = new Set(captured.keys());
+  for (const key of retainedKeys) keys.add(key);
   for (const source of sources) if (source.origin === 'internal') keys.add(source.connectionKey);
   const accepted = new Map<string, CatalogEntry>();
   for (const entry of generation.entries) {
@@ -649,6 +701,11 @@ async function collectRuntimeCapabilityCatalog(
   }
   const snapshot: RuntimeCapabilitySnapshot = Object.freeze({
     generation,
+    retainedToolNames: new Set(
+      generation.entries
+        .filter((entry) => entry.route.kind === 'tools' && retainedKeys.has(entry.route.connectionKey))
+        .map((entry) => entry.route.publicIdentity),
+    ),
     ...(Object.keys(capabilityMeta).length > 0 ? { capabilityMeta: Object.freeze(capabilityMeta) } : {}),
     getToolDefinition(identity: string) {
       const resolved = snapshot.resolve('tools', identity);
@@ -793,7 +850,7 @@ async function collectRuntimeCapabilityCatalog(
       observeConnections();
       const currentVisibility = listOptions.visibility ?? visibility;
       const selectedProviders = sourcePages.filter(
-        (provider) => provider.kind === kind && (!listOptions.internalOnly || !captured.has(provider.key)),
+        (provider) => provider.kind === kind && (!listOptions.internalOnly || provider.key.startsWith('\0app.1mcp/')),
       );
       const identity = (item: unknown): string => {
         const value = item as Record<string, unknown>;
@@ -887,6 +944,15 @@ async function collectRuntimeCapabilityCatalog(
         providers,
       });
       assertCurrent();
+      if (kind === 'tools') {
+        const counts = new Map<string, number>();
+        for (const item of result.items) {
+          const entry = generation.resolve('tools', identity(item), keys);
+          if (!entry || !retainedKeys.has(entry.route.connectionKey)) continue;
+          counts.set(entry.route.server, (counts.get(entry.route.server) ?? 0) + 1);
+        }
+        for (const [server, count] of counts) writeLocalDiagnostic('info', 'tool.catalog-retained', { server, count });
+      }
       return result;
     },
   });
@@ -905,6 +971,15 @@ async function collectRuntimeCapabilityCatalog(
         );
     }
     publishCompleteConfiguredToolTargetSnapshots(connections);
+    for (const [name, { tools, pageSizes }] of completeStaticLists) {
+      options.retention!.store.publish(
+        name,
+        options.retention!.serverConfigs[name],
+        tools,
+        capturedAdapters.get(name)?.protocolRevision,
+        pageSizes,
+      );
+    }
   }
   return snapshot;
 }

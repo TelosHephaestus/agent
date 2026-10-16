@@ -1,3 +1,4 @@
+import { isOperatorDisabledTemplateDefinition } from '@src/config/configuredServerTargets.js';
 import { getConfiguredServerTargets } from '@src/config/configuredServerTargets.js';
 import { attachCatalogCursorOwner, CapabilityCatalog } from '@src/core/capabilities/capabilityCatalog.js';
 import {
@@ -5,6 +6,7 @@ import {
   createCapabilityVisibility,
   getResourceRouteOwner,
 } from '@src/core/capabilities/capabilityVisibility.js';
+import { getRetainedToolCatalog } from '@src/core/capabilities/retainedToolCatalog.js';
 import { acquireRuntimeCapabilityCatalog } from '@src/core/capabilities/runtimeCapabilityCatalog.js';
 import { SchemaCache } from '@src/core/capabilities/schemaCache.js';
 import { ToolRegistry } from '@src/core/capabilities/toolRegistry.js';
@@ -12,6 +14,7 @@ import { byCapabilities } from '@src/core/filtering/clientFiltering.js';
 import { FilteringService } from '@src/core/filtering/filteringService.js';
 import { createConnectionResolver } from '@src/core/server/connectionResolver.js';
 import { ServerManager } from '@src/core/server/serverManager.js';
+import { ClientStatus } from '@src/core/types/client.js';
 import {
   InboundConnection,
   type InboundConnectionConfig,
@@ -95,6 +98,7 @@ export function resolveCapabilityVisibility(
   inboundConn: InboundConnectionConfig,
   sessionId: string | undefined,
   capability: 'tools' | 'resources' | 'prompts',
+  retainedConfigs?: Record<string, MCPServerParams>,
 ): CapabilityVisibility {
   // Scope template instances before applying client filters and availability.
   const sessionScoped = filterConnectionsForSession(outboundConns, sessionId);
@@ -102,6 +106,26 @@ export function resolveCapabilityVisibility(
   const capabilityRequirement =
     capability === 'tools' ? { tools: {} } : capability === 'resources' ? { resources: {} } : { prompts: {} };
   const capable = byCapabilities(capabilityRequirement)(tagAndPresetScoped);
+  if (capability === 'tools' && retainedConfigs) {
+    const store = getRetainedToolCatalog();
+    store.reconcile(retainedConfigs);
+    const retainedCandidates = new Map<string, OutboundConnection>();
+    for (const [name, config] of Object.entries(retainedConfigs)) {
+      if (isOperatorDisabledTemplateDefinition(config) || !store.read(name)) continue;
+      // Visibility-only records: never added to the real outbound connection map.
+      retainedCandidates.set(name, {
+        name,
+        tags: config.tags ?? [],
+        status: ClientStatus.Connected,
+        capabilities: { tools: {} },
+        requiresOAuth: false,
+        adapter: undefined as never,
+      });
+    }
+    for (const [name, candidate] of FilteringService.getFilteredConnections(retainedCandidates, inboundConn)) {
+      if (!capable.has(name)) capable.set(name, candidate);
+    }
+  }
 
   const visibility = createCapabilityVisibility(
     Array.from(

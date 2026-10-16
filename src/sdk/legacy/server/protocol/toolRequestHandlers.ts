@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import { getConfiguredServerTargets } from '@src/config/configuredServerTargets.js';
+import { McpConfigManager } from '@src/config/mcpConfigManager.js';
 import { InternalCapabilitiesProvider } from '@src/core/capabilities/internalCapabilitiesProvider.js';
 import { LazyLoadingOrchestrator } from '@src/core/capabilities/lazyLoadingOrchestrator.js';
+import { getRetainedToolCatalog } from '@src/core/capabilities/retainedToolCatalog.js';
 import {
   acquireRuntimeCapabilityCatalog,
   type PreparedToolCall,
@@ -17,6 +19,7 @@ import {
 } from '@src/core/protocol/requestHandlerUtils.js';
 import { getDisabledSourceToolError } from '@src/core/server/disabledTools.js';
 import { withRuntimeAdmission } from '@src/core/server/runtimeDrain.js';
+import { ClientStatus } from '@src/core/types/client.js';
 import { InboundConnection } from '@src/core/types/index.js';
 import { SchemaBoundaryError } from '@src/core/validation/schemaBoundary.js';
 import { withSelectedNativeInputResponses } from '@src/gateway/interactions/nativeInputResponses.js';
@@ -36,6 +39,7 @@ import {
 } from '@src/sdk/legacy/shared/schemaProjection.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@src/sdk/legacy/types.js';
 import { withErrorHandling } from '@src/utils/core/errorHandling.js';
+import { buildPublicToolName } from '@src/utils/core/toolNames.js';
 
 import { withPrivateInteractionConnection } from './privateInteractionConnection.js';
 import { withProviderRequestProgress } from './requestProviderProgress.js';
@@ -49,9 +53,10 @@ export function registerToolHandlers(
   const sessionId = getRequestSession(inboundConn);
   const lazy = lazyLoadingOrchestrator?.isEnabled() ?? false;
   const acquire = async (cursor?: string, signal?: AbortSignal, { upstream = true } = {}) => {
+    const staticConfigs = McpConfigManager.getInstance().getTransportConfig();
     const resolved = lazy
       ? resolveLazyCapabilityVisibility(outboundConns, inboundConn, sessionId)
-      : resolveCapabilityVisibility(outboundConns, inboundConn, sessionId, 'tools');
+      : resolveCapabilityVisibility(outboundConns, inboundConn, sessionId, 'tools', staticConfigs);
     // Lazy discovery lists only gateway tools, so it must not wait on upstream enumeration.
     const visibility = upstream ? resolved : { ...resolved, serverCandidates: new Map<string, string>() };
     const provider = InternalCapabilitiesProvider.getInstance();
@@ -64,6 +69,7 @@ export function registerToolHandlers(
     const serverConfigs = getConfiguredServerTargets();
     const snapshot = await acquireRuntimeCapabilityCatalog(outboundConns, visibility, {
       serverConfigs,
+      ...(!lazy && upstream ? { retention: { store: getRetainedToolCatalog(), serverConfigs: staticConfigs } } : {}),
       signal,
       internalTools: lazy
         ? internalTools.filter((tool) => !['tool_list', 'tool_schema', 'tool_invoke'].includes(tool.name))
@@ -101,6 +107,13 @@ export function registerToolHandlers(
             limits: RESPONSE_JSON_VALUE_LIMITS,
             ...(inboundConn.canonicalSchemaProjection ? {} : { project: projectLegacyTool }),
           },
+        });
+        const retainedToolCount = result.items.filter((tool) => snapshot.retainedToolNames?.has(tool.name)).length;
+        // Warn-level while any tool is served from retention so operators running at
+        // --log-level warn can see exactly when a client received a degraded catalog.
+        writeLocalDiagnostic(retainedToolCount > 0 ? 'warn' : 'info', 'tool.catalog-response', {
+          totalToolCount: result.items.length,
+          retainedToolCount,
         });
         const listed = {
           tools: result.items,
@@ -148,6 +161,22 @@ export function registerToolHandlers(
         writeLocalDiagnostic('info', 'tool.requested', requested);
         writeLocalDiagnostic('debug', 'tool.arguments', () => ({ ...requested, arguments: request.params.arguments }));
         try {
+          if (!lazy) {
+            const staticConfigs = McpConfigManager.getInstance().getTransportConfig();
+            const store = getRetainedToolCatalog();
+            store.reconcile(staticConfigs);
+            const visible = resolveCapabilityVisibility(outboundConns, inboundConn, sessionId, 'tools', staticConfigs);
+            for (const name of Object.keys(staticConfigs)) {
+              if (!visible.serverCandidates.has(name)) continue;
+              if (outboundConns.get(name)?.status === ClientStatus.Connected) continue;
+              const tool = store
+                .read(name)
+                ?.find((tool) => buildPublicToolName(name, tool.name) === request.params.name);
+              if (!tool || getDisabledSourceToolError(staticConfigs, name, tool.name)) continue;
+              writeLocalDiagnostic('warn', 'tool.unavailable', { ...requested, server: name, tool: tool.name });
+              return unavailableToolResult(name);
+            }
+          }
           const args = request.params.arguments;
           const toolListContinuation =
             lazy &&
@@ -184,6 +213,12 @@ export function registerToolHandlers(
             timeoutMs: resolved.connection?.requestTimeoutMs,
           };
           writeLocalDiagnostic('info', 'tool.routed', diagnosticRoute);
+          if (
+            resolved.entry.route.origin === 'external' &&
+            (!resolved.connection || resolved.connection.status !== ClientStatus.Connected)
+          ) {
+            return unavailableToolResult(resolved.entry.route.server);
+          }
           const adapter = resolved.connection?.adapter;
           phase = 'input_validation';
           let validateOutput: PreparedToolCall;
@@ -334,6 +369,18 @@ export function registerToolHandlers(
       'Error calling tool',
     ),
   );
+}
+
+function unavailableToolResult(server: string) {
+  return {
+    isError: true,
+    content: [
+      {
+        type: 'text' as const,
+        text: `Server not connected: ${server}. Backend temporarily unavailable; retry the request.`,
+      },
+    ],
+  };
 }
 
 function structuredToolResult(result: unknown) {
