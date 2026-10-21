@@ -1,13 +1,30 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+
 import * as validation from '@src/gateway/interactions/validateInteractionResponse.js';
+import {
+  getCapabilityPaginationGeneration,
+  registerCapabilityPaginationNotifications,
+  unregisterCapabilityPaginationConnections,
+} from '@src/core/capabilities/capabilityPagination.js';
 import type { CatalogEntry } from '@src/core/capabilities/catalogGeneration.js';
+import { acquireRuntimeCapabilityCatalog } from '@src/core/capabilities/runtimeCapabilityCatalog.js';
 import { ClientStatus, type InboundConnection, type OutboundConnection } from '@src/core/types/index.js';
 import { InteractionOwner } from '@src/gateway/interactions/interactionOwner.js';
 import type { LegacySdkEvent } from '@src/sdk/contracts/index.js';
+import { ClientFactory } from '@src/sdk/legacy/client/runtime/clientFactory.js';
+import { createLegacyOutboundConnection } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
+import type { AuthProviderTransport } from '@src/sdk/legacy/client/runtime/legacyTransport.js';
+import { Server } from '@src/sdk/legacy/server/index.js';
 import type { RequestHandlerExtra } from '@src/sdk/legacy/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@src/sdk/legacy/types.js';
+import {
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+} from '@src/sdk/legacy/types.js';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,7 +37,8 @@ import {
 } from './requestInteractionScope.js';
 
 const handlers = vi.hoisted(() => new Map<string, (request: ServerRequest) => Promise<unknown>>());
-vi.mock('@src/sdk/legacy/client/runtime/legacyOutboundConnection.js', () => ({
+vi.mock('@src/sdk/legacy/client/runtime/legacyOutboundConnection.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@src/sdk/legacy/client/runtime/legacyOutboundConnection.js')>()),
   setOutboundRequestHandler: (
     _connection: unknown,
     schema: { shape: { method: { value: string } } },
@@ -44,6 +62,58 @@ function fixture() {
     sendNotification: vi.fn(),
   } as unknown as RequestHandlerExtra<ServerRequest, ServerNotification>;
   return { inbound, connection, extra };
+}
+
+async function isolatedFixture(kind: 'prompts' | 'resources') {
+  const state = fixture();
+  const peers: Server[] = [];
+  const recreate = (): AuthProviderTransport => {
+    const peer = new Server(
+      { name: 'provider', version: '1' },
+      {
+        capabilities: { prompts: { listChanged: true }, resources: { listChanged: true } },
+      },
+    );
+    peer.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [{ name: 'park' }] }));
+    peer.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: [{ name: 'park', uri: 'file:///park' }],
+    }));
+    peer.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: [] }));
+    peers.push(peer);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    void peer.connect(serverTransport);
+    return Object.assign(clientTransport, { recreate });
+  };
+  const transport = recreate();
+  const client = new ClientFactory().createClient(transport);
+  await client.connect(transport);
+  const key = state.connection.adapter.connectionId;
+  const connection = createLegacyOutboundConnection({
+    name: key,
+    client,
+    transport,
+    status: ClientStatus.Connected,
+    capabilities: { prompts: { listChanged: true }, resources: { listChanged: true } },
+  });
+  const connections = new Map([[key, connection]]);
+  registerCapabilityPaginationNotifications(connections, connection);
+  const snapshot = await acquireRuntimeCapabilityCatalog(connections);
+  const entry = snapshot.generation.entries.find((candidate) => candidate.route.kind === kind)!;
+  return {
+    ...state,
+    connection,
+    entry,
+    async notify() {
+      const before = getCapabilityPaginationGeneration(connections, kind);
+      await peers[0].notification({ method: `notifications/${kind}/list_changed` });
+      await vi.waitFor(() => expect(getCapabilityPaginationGeneration(connections, kind)).not.toBe(before));
+    },
+    async close() {
+      unregisterCapabilityPaginationConnections(connections);
+      await connection.adapter.close();
+      await Promise.all(peers.map((peer) => peer.close()));
+    },
+  };
 }
 
 describe('legacy operation interaction ownership', () => {
@@ -341,21 +411,14 @@ describe('legacy operation interaction ownership', () => {
   it.each(['prompts', 'resources'] as const)(
     'invalidates parked %s callbacks only for the selected provider generation',
     async (kind) => {
-      const selected = fixture();
-      const unrelated = fixture();
-      const emitters = new Map<OutboundConnection, (event: LegacySdkEvent) => void>();
-      for (const item of [selected, unrelated]) {
-        item.connection.status = ClientStatus.Connected;
-        item.connection.adapter.nextEvent = vi.fn(
-          () =>
-            new Promise<LegacySdkEvent>((resolve) => {
-              emitters.set(item.connection, resolve);
-            }),
-        );
-      }
-      const entry = { route: { kind, connectionKey: 'selected' } } as CatalogEntry;
+      const selected = await isolatedFixture(kind);
+      const unrelated = await isolatedFixture(kind);
       let answer!: (value: unknown) => void;
       let finish!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
       vi.mocked(selected.extra.sendRequest).mockImplementation(
         () =>
           new Promise((resolve) => {
@@ -366,46 +429,38 @@ describe('legacy operation interaction ownership', () => {
         selected.connection,
         selected.inbound,
         selected.extra,
-        entry,
+        selected.entry,
         () =>
           new Promise<void>((resolve) => {
             finish = resolve;
+            entered();
           }),
       );
-      const handler = handlers.get('roots/list')!;
       try {
+        await ready;
+        const handler = handlers.get('roots/list')!;
         const first = handler({ method: 'roots/list' });
         await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
         await withPrivateInteractionConnection(
           unrelated.connection,
           unrelated.inbound,
           unrelated.extra,
-          entry,
-          async () => {
-            emitters.get(unrelated.connection)!({
-              type: 'notification',
-              notification: { method: `notifications/${kind}/list_changed` },
-            });
-            await Promise.resolve();
-          },
+          unrelated.entry,
+          unrelated.notify,
         );
         answer({ roots: [] });
         await expect(first).resolves.toEqual({ roots: [] });
         const previousAnswer = answer;
         const second = handler({ method: 'roots/list' });
         await vi.waitFor(() => expect(answer).not.toBe(previousAnswer));
-        emitters.get(selected.connection)!({
-          type: 'notification',
-          notification: { method: `notifications/${kind}/list_changed` },
-        });
-        await Promise.resolve();
+        await selected.notify();
         answer({ roots: [] });
         await expect(second).rejects.toThrow('interaction_lost');
       } finally {
         answer?.({ roots: [] });
-        finish();
+        finish?.();
         await operation;
-        for (const emit of emitters.values()) emit({ type: 'closed' });
+        await Promise.all([selected.close(), unrelated.close()]);
       }
     },
   );

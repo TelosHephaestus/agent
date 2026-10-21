@@ -57,7 +57,7 @@ vi.mock('./requestInteractionScope.js', async (importOriginal) => ({
   },
 }));
 
-async function fixture(privateResources = true) {
+async function fixture(privateResources = true, canonicalSchemaProjection = true) {
   lease.entered.mockClear();
   lease.wait = () => Promise.resolve();
   const peers: Server[] = [];
@@ -104,7 +104,7 @@ async function fixture(privateResources = true) {
   const entry = snapshot.resolve('resources', uri)!.entry;
   const inboundServer = new Server({ name: 'inbound', version: '1' });
   vi.spyOn(inboundServer, 'getClientCapabilities').mockReturnValue({ roots: {} });
-  const inbound = createMockLegacyInboundConnection({ canonicalSchemaProjection: true, server: inboundServer });
+  const inbound = createMockLegacyInboundConnection({ canonicalSchemaProjection, server: inboundServer });
   const assertCurrent = () => {
     const current = snapshot.resolve('resources', uri);
     if (
@@ -142,6 +142,16 @@ async function fixture(privateResources = true) {
 }
 
 describe('issued resource reads on isolated legacy peers', () => {
+  it('also isolates callbacks for ordinary legacy inbound clients without canonical projection', async () => {
+    const state = await fixture(true, false);
+    try {
+      await state.read();
+      expect(state.peers).toHaveLength(2);
+      expect(state.reads).toHaveBeenCalledExactlyOnceWith(1, 'urn:provider:unlisted');
+    } finally {
+      await state.close();
+    }
+  });
   it('reads a current issued URI once on a fresh private peer without rediscovery membership', async () => {
     const state = await fixture();
     try {

@@ -5,6 +5,13 @@ import { describe, expect, it } from 'vitest';
 import { ClientFactory, getAdvertisedClientCapabilities } from './clientFactory.js';
 
 describe('factory-owned advertised capability evidence', () => {
+  it('keeps shared discovery clients noninteractive unless an explicit caller profile is supplied', () => {
+    const factory = new ClientFactory();
+    expect(getAdvertisedClientCapabilities(factory.createClient())).toEqual({});
+    expect(getAdvertisedClientCapabilities(factory.createClient(undefined, { sampling: {} }))).toEqual({
+      sampling: {},
+    });
+  });
   it('records detached frozen profiles on every constructor path and leaves external clients unknown', () => {
     const factory = new ClientFactory();
     const capabilities = { roots: { listChanged: false } };

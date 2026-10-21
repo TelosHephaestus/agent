@@ -4,7 +4,9 @@ import type { ClientStatus, OutboundConnection, OutboundErrorSnapshot } from '@s
 import { type JsonObject, toJsonValue } from '@src/sdk/contracts/index.js';
 import type { LegacySdkAdapter } from '@src/sdk/contracts/index.js';
 
+import { getAdvertisedClientCapabilities } from './clientFactory.js';
 import { LegacyGatewayClientAdapter } from './legacyGatewayClientAdapter.js';
+import { enrollRequestLocalProfile } from './legacyInteractionLease.js';
 import {
   bindLegacySdkConnection,
   getLegacySdkClient,
@@ -90,6 +92,10 @@ export function createLegacyOutboundConnection(
     ...(options.supervision === undefined ? {} : { supervision: snapshotSupervision(options.supervision) }),
   };
   if (!(adapter instanceof ModernSdkClientAdapter)) bindLegacySdkConnection(adapter, connection);
+  enrollRequestLocalProfile(adapter, () => {
+    const profile = getAdvertisedClientCapabilities(options.client);
+    return profile !== undefined && Object.keys(profile).length === 0;
+  });
   return connection;
 }
 

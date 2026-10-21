@@ -13,6 +13,7 @@ import { requestLegacyAdapter } from '@src/core/client/legacyAdapterRequest.js';
 import { getRequestSession, resolveCapabilityVisibility } from '@src/core/protocol/requestHandlerUtils.js';
 import type { OutboundConnection } from '@src/core/types/index.js';
 import type { JsonValue } from '@src/sdk/contracts/index.js';
+import { enrollRequestLocalProfile } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 import type { RequestHandlerExtra } from '@src/sdk/legacy/shared/protocol.js';
 import { projectResourceUri } from '@src/sdk/legacy/shared/resourceTemplateRouting.js';
 import { ReadResourceRequestSchema, type ServerNotification, type ServerRequest } from '@src/sdk/legacy/types.js';
@@ -25,7 +26,10 @@ type ReadHandler = (
 ) => Promise<{ contents: Array<{ uri: string }> }>;
 
 const lease = vi.hoisted(() => ({ wait: () => Promise.resolve(), entered: vi.fn() }));
-const server = vi.hoisted(() => ({ setRequestHandler: vi.fn<(_schema: unknown, handler: ReadHandler) => void>() }));
+const server = vi.hoisted(() => ({
+  getClientCapabilities: () => ({}),
+  setRequestHandler: vi.fn<(_schema: unknown, handler: ReadHandler) => void>(),
+}));
 
 vi.mock('@src/core/server/serverManager.js', () => ({
   ServerManager: {
@@ -81,6 +85,7 @@ async function fixture() {
     },
   });
   const connections = new Map([['provider', connection]]);
+  enrollRequestLocalProfile(connection.adapter, () => true);
   const owner = createResourceRouteOwner();
   const inbound = createMockInboundConnection({ tags: [], context: { sessionId: 'private-bridge' } });
   bindResourceRouteOwner(inbound.context!, owner);

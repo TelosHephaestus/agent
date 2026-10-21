@@ -9,6 +9,19 @@ const ownerContext = new AsyncLocalStorage<{
   assertCurrent?: () => void;
 }>();
 const leases = new WeakMap<LegacySdkAdapter, { owner?: object; running: boolean }>();
+const requestLocalProfiles = new WeakMap<LegacySdkAdapter, () => boolean>();
+
+export function enrollRequestLocalProfile(adapter: LegacySdkAdapter, isEmpty: () => boolean): void {
+  requestLocalProfiles.set(adapter, isEmpty);
+}
+
+export function supportsRequestLocalInteractions(adapter: LegacySdkAdapter): boolean {
+  return adapter.protocol?.era === 'modern' || hasNonInteractiveProfile(adapter);
+}
+
+export function hasNonInteractiveProfile(adapter: LegacySdkAdapter): boolean {
+  return requestLocalProfiles.get(adapter)?.() === true;
+}
 
 /** Reserve the actual adapter, including callers outside the MCP protocol handlers. */
 export async function withLegacyInteractionLease<T>(
@@ -20,9 +33,9 @@ export async function withLegacyInteractionLease<T>(
   assertCurrent?: () => void,
 ): Promise<T> {
   const owner = { signal, logLevel, capabilities, assertCurrent };
-  // Modern MRTR has request-local frames and callbacks; negotiated legacy still
-  // needs exclusive ownership because reverse requests have no parent id.
-  if (adapter.protocol?.era === 'modern') return ownerContext.run(owner, operation);
+  // Empty legacy profiles cannot issue reverse requests; responses, progress and
+  // cancellation are already correlated by the SDK's individual request IDs.
+  if (supportsRequestLocalInteractions(adapter)) return ownerContext.run(owner, operation);
   if (leases.has(adapter)) throw new OneMcpProtocolError(-32000, 'interaction_capacity_exceeded');
   leases.set(adapter, { owner, running: false });
   try {
@@ -34,7 +47,7 @@ export async function withLegacyInteractionLease<T>(
 
 export function beginLegacyInteractionRequest(adapter: LegacySdkAdapter, method: string): () => void {
   if (!['tools/call', 'prompts/get', 'resources/read'].includes(method)) return () => undefined;
-  if (adapter.protocol?.era === 'modern') return () => undefined;
+  if (supportsRequestLocalInteractions(adapter)) return () => undefined;
   const lease = leases.get(adapter);
   if (lease) {
     if (lease.owner !== ownerContext.getStore() || lease.running)

@@ -16,6 +16,7 @@ import {
   type OutboundConnection,
   type OutboundConnections,
 } from '@src/core/types/index.js';
+import { enrollRequestLocalProfile } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 import {
   createLegacyOutboundConnection,
   getLegacyClient,
@@ -284,6 +285,7 @@ describe('Request Handlers', () => {
         },
       });
       mockOutboundConns.set('client1', connection);
+      enrollRequestLocalProfile(connection.adapter, () => true);
       mockParseUri.mockReturnValue({ clientName: 'client1', resourceName: 'tool' });
 
       registerRequestHandlers(mockOutboundConns, mockInboundConn);

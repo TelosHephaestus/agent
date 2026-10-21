@@ -9,6 +9,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 
 import type { OutboundConnection, OutboundConnections } from '@src/core/types/index.js';
 import { ClientStatus } from '@src/core/types/index.js';
+import { enrollRequestLocalProfile } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -117,6 +118,7 @@ describe('requestHandlers disabled tools enforcement', () => {
         }),
       ],
     ]);
+    enrollRequestLocalProfile(outboundConnections.get('filesystem')!.adapter, () => true);
   });
 
   function getRegisteredHandler(schema: unknown): (...args: any[]) => Promise<any> {
