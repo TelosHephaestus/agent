@@ -22,6 +22,7 @@ import { withErrorHandling } from '@src/utils/core/errorHandling.js';
 
 import {
   forwardScopedNotification,
+  ownedPrivateInteractionConnections,
   ownsActiveInteraction,
   registerLegacyNotificationOwner,
 } from './requestInteractionScope.js';
@@ -158,7 +159,8 @@ export function setupServerToClientNotifications(
   getLegacyInboundServer(inboundConn).setNotificationHandler(
     RootsListChangedNotificationSchema,
     async (notification) => {
-      for (const connection of outboundConns.values()) {
+      const owned = new Set([...outboundConns.values(), ...ownedPrivateInteractionConnections(inboundConn, 'roots')]);
+      for (const connection of owned) {
         if (!ownsActiveInteraction(connection, inboundConn) || connection.status !== ClientStatus.Connected) continue;
         await connection.adapter.notify({
           method: notification.method,

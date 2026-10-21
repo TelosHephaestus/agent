@@ -14,6 +14,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { ClientStatus } from '@src/core/types/index.js';
 import { Client as LegacyClient } from '@src/sdk/legacy/client/index.js';
+import { ClientFactory } from '@src/sdk/legacy/client/runtime/clientFactory.js';
 import { createLegacyOutboundConnection } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
 import { Server as LegacyServer } from '@src/sdk/legacy/server/index.js';
 import { ServerManager } from '@src/sdk/legacy/server/runtime/serverManager.js';
@@ -125,7 +126,7 @@ describe('request progress and missing-capability wire semantics', () => {
             return Object.assign(clientTransport, { recreate });
           };
           const clientTransport = recreate();
-          const client = new LegacyClient({ name: 'gateway-upstream', version: '1' });
+          const client = new ClientFactory().createClient(clientTransport, {});
           await client.connect(clientTransport);
           connection = createLegacyOutboundConnection({
             name: 'fixture',

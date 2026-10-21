@@ -51,6 +51,16 @@ const requestScopes = new WeakMap<OutboundConnection, Set<Scope>>();
 const installed = new WeakMap<OutboundConnection, OutboundConnection['adapter']>();
 const profiles = new WeakMap<OutboundConnection, ClientCapabilities>();
 const notificationOwners = new WeakMap<OutboundConnection, Set<WeakRef<InboundConnection>>>();
+const privateConnections = new WeakMap<InboundConnection, Set<OutboundConnection>>();
+
+export function ownedPrivateInteractionConnections(
+  inbound: InboundConnection,
+  capability: keyof ClientCapabilities,
+): readonly OutboundConnection[] {
+  return Array.from(privateConnections.get(inbound) ?? []).filter(
+    (connection) => profiles.get(connection)?.[capability] !== undefined,
+  );
+}
 
 function ownsScope(connection: OutboundConnection, scope: Scope): boolean {
   if (scope.requestLocal) return requestScopes.get(connection)?.has(scope) === true;
@@ -255,11 +265,21 @@ export async function withRequestInteractionScope<T>(
           if (!scopes) requestScopes.set(connection, (scopes = new Set()));
           scopes.add(scope);
         } else active.set(connection, scope);
+        if (sourceProviderId) {
+          let owned = privateConnections.get(inbound);
+          if (!owned) privateConnections.set(inbound, (owned = new Set()));
+          owned.add(connection);
+        }
         try {
           assertCurrent?.();
           return requestLocal ? await requestContext.run(scope, operation) : await operation();
         } finally {
           abort.abort();
+          if (sourceProviderId) {
+            const owned = privateConnections.get(inbound);
+            owned?.delete(connection);
+            if (!owned?.size) privateConnections.delete(inbound);
+          }
           if (requestLocal) {
             const scopes = requestScopes.get(connection);
             scopes?.delete(scope);

@@ -31,8 +31,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withPrivateInteractionConnection } from './privateInteractionConnection.js';
 import {
   forwardScopedNotification,
+  ownedPrivateInteractionConnections,
   ownsActiveInteraction,
   sessionLogLevels,
+  setRequestInteractionProfile,
   withRequestInteractionScope,
 } from './requestInteractionScope.js';
 
@@ -118,6 +120,46 @@ async function isolatedFixture(kind: 'prompts' | 'resources') {
 
 describe('legacy operation interaction ownership', () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it('routes private notifications by caller and advertised capability and removes finished peers', async () => {
+    const first = fixture();
+    const sibling = { ...fixture(), inbound: first.inbound };
+    const samplingOnly = { ...fixture(), inbound: first.inbound };
+    const otherCaller = fixture();
+    const peers = [first, sibling, samplingOnly, otherCaller];
+    const release: Array<() => void> = [];
+    setRequestInteractionProfile(first.connection, { roots: {} });
+    setRequestInteractionProfile(sibling.connection, { roots: {} });
+    setRequestInteractionProfile(samplingOnly.connection, { sampling: {} });
+    setRequestInteractionProfile(otherCaller.connection, { roots: {} });
+    const pending = peers.map((peer) =>
+      withRequestInteractionScope(
+        peer.connection,
+        peer.inbound,
+        peer.extra,
+        () =>
+          new Promise<void>((resolve) => {
+            release.push(resolve);
+          }),
+        'original-provider',
+      ),
+    );
+    try {
+      expect(ownedPrivateInteractionConnections(first.inbound, 'roots')).toEqual([
+        first.connection,
+        sibling.connection,
+      ]);
+      expect(ownedPrivateInteractionConnections(otherCaller.inbound, 'roots')).toEqual([otherCaller.connection]);
+      release[0]();
+      await pending[0];
+      expect(ownedPrivateInteractionConnections(first.inbound, 'roots')).toEqual([sibling.connection]);
+    } finally {
+      for (const finish of release) finish();
+      await Promise.all(pending);
+    }
+    expect(ownedPrivateInteractionConnections(first.inbound, 'roots')).toEqual([]);
+    expect(ownedPrivateInteractionConnections(otherCaller.inbound, 'roots')).toEqual([]);
+  });
 
   it('keeps concurrent modern callback senders local and rejects a removed owner', async () => {
     const first = fixture();

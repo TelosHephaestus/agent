@@ -17,18 +17,24 @@ import { hasNonInteractiveProfile } from '@src/sdk/legacy/client/runtime/legacyI
 import {
   createLegacyOutboundConnection,
   getLegacyTransport,
+  setOutboundNotificationHandler,
 } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
 import type { AuthProviderTransport } from '@src/sdk/legacy/client/runtime/legacyTransport.js';
 import { getLegacyInboundServer } from '@src/sdk/legacy/server/runtime/legacyInboundConnection.js';
 import type { RequestHandlerExtra } from '@src/sdk/legacy/shared/protocol.js';
 import {
   ClientCapabilitiesSchema,
+  LoggingMessageNotificationSchema,
   McpError,
   type ServerNotification,
   type ServerRequest,
 } from '@src/sdk/legacy/types.js';
 
-import { setRequestInteractionProfile, withRequestInteractionScope } from './requestInteractionScope.js';
+import {
+  forwardScopedNotification,
+  setRequestInteractionProfile,
+  withRequestInteractionScope,
+} from './requestInteractionScope.js';
 
 let active = 0;
 const capacity = 128;
@@ -143,6 +149,9 @@ async function withSelectedInteractionConnection<T>(
     const expectedRevision = source.adapter.protocolRevision ?? source.adapter.protocol?.revision ?? '2025-11-25';
     if (privateSource.adapter.protocolRevision !== expectedRevision) throw new McpError(-32000, 'interaction_lost');
     setRequestInteractionProfile(privateSource, capabilities);
+    setOutboundNotificationHandler(privateSource, LoggingMessageNotificationSchema, (notification) =>
+      forwardScopedNotification(privateSource, notification),
+    );
     return await Promise.race([
       withDerivedInteractionRoute(source.adapter, privateSource.adapter, async () => {
         if (issuedResourceRead) {
