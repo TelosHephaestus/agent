@@ -27,9 +27,9 @@ function recordProfile<T extends OutboundSdkClient>(client: T, profile: ClientCa
   advertisedProfiles.set(client, profile);
   const register = client.registerCapabilities.bind(client);
   client.registerCapabilities = (additional: ClientCapabilities) => {
-    register(additional as never);
-    // A public capability mutation invalidates constructor evidence; never infer an empty profile.
+    // An attempted mutation can partially update an SDK before throwing.
     advertisedProfiles.delete(client);
+    register(additional as never);
   };
   return client;
 }
