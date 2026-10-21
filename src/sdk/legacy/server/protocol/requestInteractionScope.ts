@@ -11,7 +11,11 @@ import {
 } from '@src/gateway/interactions/validateInteractionResponse.js';
 import type { GatewayInteractionRequest } from '@src/gateway/ports/outboundEraAdapter.js';
 import { captureTraceContext, injectTraceContext, stripBaggage } from '@src/observability/tracing/context.js';
-import { withLegacyInteractionLease } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
+import {
+  hasNonInteractiveProfile,
+  supportsRequestLocalInteractions,
+  withLegacyInteractionLease,
+} from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 import { setOutboundRequestHandler } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
 import { getLegacyInboundServer } from '@src/sdk/legacy/server/runtime/legacyInboundConnection.js';
 import type { RequestHandlerExtra } from '@src/sdk/legacy/shared/protocol.js';
@@ -38,23 +42,34 @@ interface Scope {
   readonly runTrace: ReturnType<typeof captureTraceContext>;
   readonly abort: AbortController;
   readonly assertCurrent?: () => void;
+  readonly requestLocal: boolean;
 }
 const legacyOwners = new InteractionOwner();
 const active = new WeakMap<OutboundConnection, Scope>();
-const modernContext = new AsyncLocalStorage<Scope>();
-const modernScopes = new WeakMap<OutboundConnection, Set<Scope>>();
+const requestContext = new AsyncLocalStorage<Scope>();
+const requestScopes = new WeakMap<OutboundConnection, Set<Scope>>();
 const installed = new WeakMap<OutboundConnection, OutboundConnection['adapter']>();
 const profiles = new WeakMap<OutboundConnection, ClientCapabilities>();
 const notificationOwners = new WeakMap<OutboundConnection, Set<WeakRef<InboundConnection>>>();
+const privateConnections = new WeakMap<InboundConnection, Set<OutboundConnection>>();
+
+export function ownedPrivateInteractionConnections(
+  inbound: InboundConnection,
+  capability: keyof ClientCapabilities,
+): readonly OutboundConnection[] {
+  return Array.from(privateConnections.get(inbound) ?? []).filter(
+    (connection) => profiles.get(connection)?.[capability] !== undefined,
+  );
+}
 
 function ownsScope(connection: OutboundConnection, scope: Scope): boolean {
-  if (scope.adapter.protocol?.era === 'modern') return modernScopes.get(connection)?.has(scope) === true;
+  if (scope.requestLocal) return requestScopes.get(connection)?.has(scope) === true;
   return active.get(connection) === scope;
 }
 
 function callbackScope(connection: OutboundConnection): Scope | undefined {
   if (connection.adapter.protocol?.era !== 'modern') return active.get(connection);
-  const scope = modernContext.getStore();
+  const scope = requestContext.getStore();
   return scope && ownsScope(connection, scope) ? scope : undefined;
 }
 
@@ -86,7 +101,7 @@ export function setRequestInteractionProfile(connection: OutboundConnection, cap
   profiles.set(connection, capabilities);
 }
 
-/** Legacy reverse requests have no portable parent id; reserve one operation before invoking it. */
+/** Share noninteractive peers; reserve callback-capable legacy peers exclusively. */
 export async function withRequestInteractionScope<T>(
   connection: OutboundConnection,
   inbound: InboundConnection,
@@ -95,8 +110,9 @@ export async function withRequestInteractionScope<T>(
   sourceProviderId?: string,
   assertCurrent?: () => void,
 ): Promise<T> {
-  const modern = connection.adapter.protocol?.era === 'modern';
-  if (!modern && active.has(connection)) throw new McpError(-32000, 'interaction_capacity_exceeded');
+  const requestLocal = supportsRequestLocalInteractions(connection.adapter);
+  if (!requestLocal && (active.has(connection) || requestScopes.get(connection)?.size))
+    throw new McpError(-32000, 'interaction_capacity_exceeded');
   if (extra.signal.aborted) throw new McpError(-32000, 'interaction_lost');
   const auth = extra.authInfo;
   if (auth && (typeof auth.clientId !== 'string' || !auth.clientId || typeof auth.token !== 'string' || !auth.token))
@@ -107,20 +123,21 @@ export async function withRequestInteractionScope<T>(
         .digest('hex')
     : `legacy:${inbound.connectionId}`;
   // The trusted modern bridge already owns a process/owner reservation across its rounds.
-  const admission = currentNativeInteractionRound()
-    ? undefined
-    : legacyOwners.start(
-        {
-          principal,
-          request: String(extra.requestId),
-          route: connection.adapter.connectionId,
-          provider: sourceProviderId ?? connection.adapter.connectionId,
-          generation: connection.adapter.connectionId,
-          inbound: 'legacy',
-          outbound: connection.adapter.protocol?.era ?? 'legacy',
-        },
-        Date.now() + 600_000,
-      );
+  const admission =
+    currentNativeInteractionRound() || hasNonInteractiveProfile(connection.adapter)
+      ? undefined
+      : legacyOwners.start(
+          {
+            principal,
+            request: String(extra.requestId),
+            route: connection.adapter.connectionId,
+            provider: sourceProviderId ?? connection.adapter.connectionId,
+            generation: connection.adapter.connectionId,
+            inbound: 'legacy',
+            outbound: connection.adapter.protocol?.era ?? 'legacy',
+          },
+          Date.now() + 600_000,
+        );
   const abort = new AbortController();
   const scopedExtra = {
     ...extra,
@@ -241,21 +258,32 @@ export async function withRequestInteractionScope<T>(
           runTrace: captureTraceContext(),
           abort,
           assertCurrent,
+          requestLocal,
         });
-        if (modern) {
-          let scopes = modernScopes.get(connection);
-          if (!scopes) modernScopes.set(connection, (scopes = new Set()));
+        if (requestLocal) {
+          let scopes = requestScopes.get(connection);
+          if (!scopes) requestScopes.set(connection, (scopes = new Set()));
           scopes.add(scope);
         } else active.set(connection, scope);
+        if (sourceProviderId) {
+          let owned = privateConnections.get(inbound);
+          if (!owned) privateConnections.set(inbound, (owned = new Set()));
+          owned.add(connection);
+        }
         try {
           assertCurrent?.();
-          return modern ? await modernContext.run(scope, operation) : await operation();
+          return requestLocal ? await requestContext.run(scope, operation) : await operation();
         } finally {
           abort.abort();
-          if (modern) {
-            const scopes = modernScopes.get(connection);
+          if (sourceProviderId) {
+            const owned = privateConnections.get(inbound);
+            owned?.delete(connection);
+            if (!owned?.size) privateConnections.delete(inbound);
+          }
+          if (requestLocal) {
+            const scopes = requestScopes.get(connection);
             scopes?.delete(scope);
-            if (!scopes?.size) modernScopes.delete(connection);
+            if (!scopes?.size) requestScopes.delete(connection);
           } else if (active.get(connection) === scope) active.delete(connection);
         }
       },
@@ -278,9 +306,9 @@ export async function forwardScopedNotification(
 ): Promise<void> {
   // Progress is delivered only by the SDK's request-specific onprogress callback.
   if (notification.method === 'notifications/progress') return;
-  const scopes = modernScopes.get(connection);
+  const scopes = requestScopes.get(connection);
   // These raw notifications have no portable parent id. Never choose an owner
-  // from an ambiguous modern operation set.
+  // from an ambiguous request-local operation set.
   if (scopes && scopes.size !== 1) return;
   const scope = scopes ? scopes.values().next().value : active.get(connection);
   if (!scope) {
@@ -313,8 +341,8 @@ export async function forwardScopedNotification(
 
 export function ownsActiveInteraction(connection: OutboundConnection, inbound: InboundConnection): boolean {
   let scope: Scope | undefined;
-  if (connection.adapter.protocol?.era === 'modern') {
-    const scopes = modernScopes.get(connection);
+  if (requestScopes.has(connection)) {
+    const scopes = requestScopes.get(connection);
     if (scopes?.size !== 1) return false;
     scope = scopes.values().next().value;
   } else scope = active.get(connection);

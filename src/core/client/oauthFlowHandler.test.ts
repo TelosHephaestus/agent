@@ -9,7 +9,6 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from '@src/constants.js';
-import { MCP_CLIENT_CAPABILITIES } from '@src/constants.js';
 import { ClientStatus, OutboundConnection } from '@src/core/types/index.js';
 import logger from '@src/logger/logger.js';
 import { getLegacyClient, getLegacyTransport } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
@@ -572,7 +571,7 @@ describe('OAuthFlowHandler', () => {
           version: MCP_SERVER_VERSION,
         },
         expect.objectContaining({
-          capabilities: MCP_CLIENT_CAPABILITIES,
+          capabilities: {},
           jsonSchemaValidator: expect.any(Object),
           debouncedNotificationMethods: expect.any(Array),
         }),

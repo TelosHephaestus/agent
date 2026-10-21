@@ -1,10 +1,30 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ClientFactory, getAdvertisedClientCapabilities } from './clientFactory.js';
 
 describe('factory-owned advertised capability evidence', () => {
+  it('invalidates evidence before a capability mutation even when registration throws', () => {
+    const registration = vi.spyOn(Client.prototype, 'registerCapabilities').mockImplementation(() => {
+      throw new Error('registration failed');
+    });
+    try {
+      const client = new ClientFactory().createClient(undefined, {});
+      expect(getAdvertisedClientCapabilities(client)).toEqual({});
+      expect(() => client.registerCapabilities({ roots: {} })).toThrow('registration failed');
+      expect(getAdvertisedClientCapabilities(client)).toBeUndefined();
+    } finally {
+      registration.mockRestore();
+    }
+  });
+  it('keeps shared discovery clients noninteractive unless an explicit caller profile is supplied', () => {
+    const factory = new ClientFactory();
+    expect(getAdvertisedClientCapabilities(factory.createClient())).toEqual({});
+    expect(getAdvertisedClientCapabilities(factory.createClient(undefined, { sampling: {} }))).toEqual({
+      sampling: {},
+    });
+  });
   it('records detached frozen profiles on every constructor path and leaves external clients unknown', () => {
     const factory = new ClientFactory();
     const capabilities = { roots: { listChanged: false } };

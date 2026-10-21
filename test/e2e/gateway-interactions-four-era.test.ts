@@ -172,7 +172,10 @@ describe('real gateway interaction peers across protocol eras', () => {
             for (const operation of operations)
               backend.setRequestHandler(operation.schema, async (request) => {
                 expectTrace(request.params, request.method);
-                if (privatePeer) expect(backend.getClientCapabilities()).toEqual(selectedCapabilities(selected.method));
+                if (privatePeer)
+                  expect(backend.getClientCapabilities()).toEqual(
+                    inboundEra === 'legacy' ? clientCapabilities : selectedCapabilities(selected.method),
+                  );
                 upstreamExecutions++;
                 // A side effect before parking must never be repeated by a continuation.
                 sideEffects++;
@@ -402,7 +405,7 @@ describe('real gateway interaction peers across protocol eras', () => {
             expect(upstreamExecutions - before.upstreamExecutions).toBe(upstreamEra === 'legacy' ? 1 : 2);
           }
         }
-        if (upstreamEra === 'legacy') expect(legacyConnections).toBe(inboundEra === 'modern' ? 10 : 1);
+        if (upstreamEra === 'legacy') expect(legacyConnections).toBe(10);
         if (upstreamEra === 'legacy' && inboundEra === 'modern') {
           selected = interactions[0];
           interactiveUnlisted = true;

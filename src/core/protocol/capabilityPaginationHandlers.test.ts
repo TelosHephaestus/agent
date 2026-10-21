@@ -24,6 +24,7 @@ import {
 } from '@src/core/capabilities/capabilityPagination.js';
 import type { OutboundConnection, OutboundConnections } from '@src/core/types/index.js';
 import { ClientStatus, ServerStatus } from '@src/core/types/index.js';
+import { enrollRequestLocalProfile } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 import { cleanupOwnedResources } from '@src/sdk/legacy/server/protocol/resourceSubscriptions.js';
 import { buildPublicResourceUri, isValidResourceUri } from '@src/utils/core/resourceUris.js';
 
@@ -118,6 +119,7 @@ describe('capability pagination protocol handlers', () => {
       client: createMockClient({ ...client, request } as never) as Client,
       transport: { ...createMockTransport(), timeout: 5000, tags },
     });
+    enrollRequestLocalProfile(outbound.adapter, () => true);
     return outbound;
   }
 

@@ -2,7 +2,7 @@ import { Client as ModernClient, type VersionNegotiationMode } from '@modelconte
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
-import { MCP_CLIENT_CAPABILITIES, MCP_SERVER_NAME, MCP_SERVER_VERSION } from '@src/constants.js';
+import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from '@src/constants.js';
 import { CustomJsonSchemaValidator } from '@src/core/validation/CustomJsonSchemaValidator.js';
 import { captureJson } from '@src/core/validation/schemaPolicy.js';
 import type { ClientCapabilities } from '@src/sdk/legacy/types.js';
@@ -27,18 +27,15 @@ function recordProfile<T extends OutboundSdkClient>(client: T, profile: ClientCa
   advertisedProfiles.set(client, profile);
   const register = client.registerCapabilities.bind(client);
   client.registerCapabilities = (additional: ClientCapabilities) => {
-    register(additional as never);
-    // A public capability mutation invalidates constructor evidence; never infer an empty profile.
+    // An attempted mutation can partially update an SDK before throwing.
     advertisedProfiles.delete(client);
+    register(additional as never);
   };
   return client;
 }
 
 export class ClientFactory {
-  public createClient(
-    transport?: AuthProviderTransport,
-    capabilities: ClientCapabilities = MCP_CLIENT_CAPABILITIES,
-  ): OutboundSdkClient {
+  public createClient(transport?: AuthProviderTransport, capabilities: ClientCapabilities = {}): OutboundSdkClient {
     capabilities = captureJson(capabilities, false).value as ClientCapabilities;
     if (transport) {
       const setProtocolVersion = transport.setProtocolVersion?.bind(transport);
