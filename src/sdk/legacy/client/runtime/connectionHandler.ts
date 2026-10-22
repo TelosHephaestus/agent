@@ -3,6 +3,7 @@ import {
   ProtocolError,
   SdkError,
   SdkErrorCode,
+  SdkHttpError,
   UnsupportedProtocolVersionError,
 } from '@modelcontextprotocol/client';
 
@@ -33,6 +34,16 @@ const TERMINAL_MODERN_CONNECT_ERRORS = new Set<SdkErrorCode>([
   SdkErrorCode.ClientHttpForbidden,
   SdkErrorCode.ClientHttpUnexpectedContent,
 ]);
+
+function isNonRetryableModernConnectError(error: unknown): boolean {
+  if (!(error instanceof SdkError)) return false;
+  if (!TERMINAL_MODERN_CONNECT_ERRORS.has(error.code)) return false;
+  if (error.code !== SdkErrorCode.EraNegotiationFailed) return true;
+  // Negotiation wraps temporary HTTP server failures in the same code as a
+  // rejected protocol. Preserve their status so background loading can recover.
+  if (error instanceof SdkHttpError && error.status >= 500 && error.status < 600) return false;
+  return true;
+}
 
 function isNonRetryableOAuthError(error: unknown): error is OAuthError {
   if (!(error instanceof OAuthError)) return false;
@@ -133,7 +144,7 @@ export class ConnectionHandler {
           error instanceof SseWireLimitError ||
           error instanceof ProtocolError ||
           error instanceof UnsupportedProtocolVersionError ||
-          (error instanceof SdkError && TERMINAL_MODERN_CONNECT_ERRORS.has(error.code))
+          isNonRetryableModernConnectError(error)
         ) {
           if (ownsReplacementCandidate) {
             await this.disposeFailedCandidate(currentClient, currentTransport as AuthProviderTransport, name);

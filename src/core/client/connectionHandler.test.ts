@@ -3,6 +3,7 @@ import {
   ProtocolError,
   SdkError,
   SdkErrorCode,
+  SdkHttpError,
   UnsupportedProtocolVersionError,
 } from '@modelcontextprotocol/client';
 
@@ -308,6 +309,47 @@ describe('ConnectionHandler', () => {
       expect(error).toBeInstanceOf(OAuthRequiredError);
       expect((error as OAuthRequiredError).transport).toBe(replacementTransport);
       expect((error as OAuthRequiredError).client).toBe(replacementClient);
+    });
+
+    it.each([500, 502, 503, 504, 599])(
+      'retries HTTP %i negotiation failures with a fresh candidate',
+      async (status) => {
+        const failure = new SdkHttpError(SdkErrorCode.EraNegotiationFailed, 'Version negotiation failed', { status });
+        vi.mocked(mockClient.connect!).mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
+        vi.mocked(mockClient.getServerVersion!).mockReturnValue({ name: 'recovered-backend', version: '1.0.0' });
+        const recreate = vi.fn(() => mockTransport as AuthProviderTransport);
+        const outcome = connectionHandler
+          .connectWithRetry(mockClient as Client, mockTransport, 'recovering-backend', undefined, recreate)
+          .then(
+            (value) => ({ value }),
+            (error: unknown) => ({ error }),
+          );
+
+        await vi.runAllTimersAsync();
+
+        expect(await outcome).toEqual({ value: { client: mockClient, transport: mockTransport } });
+        expect(mockClient.connect).toHaveBeenCalledTimes(2);
+        expect(recreate).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each([400, 403, 422])('keeps HTTP %i negotiation refusals terminal', async (status) => {
+      vi.mocked(mockClient.connect!).mockRejectedValue(
+        new SdkHttpError(SdkErrorCode.EraNegotiationFailed, 'Version negotiation refused', { status }),
+      );
+      const recreate = vi.fn();
+
+      await expect(
+        connectionHandler.connectWithRetry(
+          mockClient as Client,
+          mockTransport,
+          'terminal-backend',
+          undefined,
+          recreate,
+        ),
+      ).rejects.toThrow('Version negotiation refused');
+      expect(mockClient.connect).toHaveBeenCalledOnce();
+      expect(recreate).not.toHaveBeenCalled();
     });
 
     it('does not retry a terminal modern negotiation error', async () => {
