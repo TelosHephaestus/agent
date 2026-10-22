@@ -7,6 +7,10 @@ description: Configure local 1MCP logs, understand their privacy limits, and fol
 
 1MCP writes local logs for startup, connections, configuration changes, and request failures. It also forwards valid trace context supplied by MCP clients, so related operations can be correlated across servers that support tracing. No tracing setup is required for normal use.
 
+## Inspect unfinished and failed operations
+
+The bounded operation journal is available through the existing authenticated HTTP API, including at `warn` log level. It separates caller outcomes, backend RPC evidence, callbacks, and private closes. The operator script also reads native backend loading state. See [Inspect gateway operations](/guide/advanced/gateway-operations) for queries, coverage limits, and optional metadata-only Clio export. This does not enable OTLP spans or replace household functional-health monitoring.
+
 ## Choose where logs go
 
 The default log level is `info`. Use `debug` when investigating a problem and `--log-file` to keep a local copy:
@@ -72,7 +76,7 @@ A tracing-aware MCP client can supply W3C context in request metadata:
 
 1MCP forwards valid `traceparent` and optional `tracestate` metadata to the selected backend. Related server-to-client requests and continuation requests retain the operation's context. Invalid context is ignored; it does not change authorization or server selection. HTTP trace headers do not substitute for MCP request metadata.
 
-This support carries existing context; 1MCP does not generate spans, collect metrics, or export telemetry to a collector. Setting an OTLP endpoint does not enable export, and `OTEL_SDK_DISABLED=true` does not turn off message context propagation. A backend's own tracing and export settings remain under that backend's control.
+This tracing support carries existing context; it does not generate spans or install a metrics or OTLP provider. Setting an OTLP endpoint does not enable span export, and `OTEL_SDK_DISABLED=true` does not turn off message context propagation. Optional operation-event export to Clio is configured separately. A backend's own tracing and export settings remain under that backend's control.
 
 ## Privacy and backend diagnostics
 

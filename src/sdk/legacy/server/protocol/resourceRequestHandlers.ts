@@ -6,6 +6,7 @@ import { getRequestSession, resolveCapabilityVisibility } from '@src/core/protoc
 import { InboundConnection } from '@src/core/types/index.js';
 import { createGatewayFailure } from '@src/gateway/contracts/gatewayFailure.js';
 import { withSelectedNativeInputResponses } from '@src/gateway/interactions/nativeInputResponses.js';
+import { observeOperation } from '@src/observability/operations/operationJournal.js';
 import { RESPONSE_JSON_VALUE_LIMITS } from '@src/sdk/contracts/index.js';
 import {
   type LegacyOutboundConnections,
@@ -107,62 +108,75 @@ export function registerResourceHandlers(
   );
   server.setRequestHandler(
     ReadResourceRequestSchema,
-    withErrorHandling(async (request, extra) => {
-      const snapshot = await acquire();
-      const route = resolveResourceRoute(snapshot, request.params.uri);
-      const assertResourceCurrent = () => {
-        // A private lease can wait past handle expiry or owner revocation.
-        try {
-          const current = resolveResourceRoute(snapshot, request.params.uri);
-          if (
-            current.entry === route.entry &&
-            current.connection === route.connection &&
-            current.upstreamIdentity === route.upstreamIdentity
-          )
-            return;
-        } catch {
-          // Report only the trusted boundary failure, without the caller's URI.
-        }
-        throw createGatewayFailure({ kind: 'protocol', code: '-32602', message: 'Resource route is unavailable' });
-      };
-      const { _meta: _callerMeta, ...params } = request.params;
-      const result = await withProviderRequestProgress(
-        outboundConns,
-        route.connection,
-        route.entry,
-        extra,
-        request.params._meta?.progressToken,
-        () =>
-          withPrivateInteractionConnection(
-            route.connection,
-            inboundConn,
-            extra,
-            route.entry,
-            (selected) =>
-              withSelectedNativeInputResponses(
-                request.params.uri,
-                'resources/read',
-                selected.adapter,
-                route.upstreamIdentity,
-                () =>
-                  requestLegacyOutbound<{ contents: Array<{ uri: string; [key: string]: unknown }> }>(
-                    selected,
-                    'resources/read',
-                    { ...params, uri: route.upstreamIdentity },
-                  ),
-              ),
-            assertResourceCurrent,
-            isIssuedRuntimeResourceEntry(route.entry) ? route.entry : undefined,
-          ),
-        assertResourceCurrent,
-      );
-      return {
-        ...result,
-        contents: result.contents.map((content) => ({
-          ...content,
-          uri: projectResourceUri(snapshot, route.entry.route.connectionKey, content.uri),
-        })),
-      };
-    }, 'Error reading resource'),
+    withErrorHandling(
+      (request, extra) =>
+        observeOperation(
+          'resources/read',
+          getRequestSession(inboundConn),
+          async () => {
+            const snapshot = await acquire();
+            const route = resolveResourceRoute(snapshot, request.params.uri);
+            const assertResourceCurrent = () => {
+              // A private lease can wait past handle expiry or owner revocation.
+              try {
+                const current = resolveResourceRoute(snapshot, request.params.uri);
+                if (
+                  current.entry === route.entry &&
+                  current.connection === route.connection &&
+                  current.upstreamIdentity === route.upstreamIdentity
+                )
+                  return;
+              } catch {
+                // Report only the trusted boundary failure, without the caller's URI.
+              }
+              throw createGatewayFailure({
+                kind: 'protocol',
+                code: '-32602',
+                message: 'Resource route is unavailable',
+              });
+            };
+            const { _meta: _callerMeta, ...params } = request.params;
+            const result = await withProviderRequestProgress(
+              outboundConns,
+              route.connection,
+              route.entry,
+              extra,
+              request.params._meta?.progressToken,
+              () =>
+                withPrivateInteractionConnection(
+                  route.connection,
+                  inboundConn,
+                  extra,
+                  route.entry,
+                  (selected) =>
+                    withSelectedNativeInputResponses(
+                      request.params.uri,
+                      'resources/read',
+                      selected.adapter,
+                      route.upstreamIdentity,
+                      () =>
+                        requestLegacyOutbound<{ contents: Array<{ uri: string; [key: string]: unknown }> }>(
+                          selected,
+                          'resources/read',
+                          { ...params, uri: route.upstreamIdentity },
+                        ),
+                    ),
+                  assertResourceCurrent,
+                  isIssuedRuntimeResourceEntry(route.entry) ? route.entry : undefined,
+                ),
+              assertResourceCurrent,
+            );
+            return {
+              ...result,
+              contents: result.contents.map((content) => ({
+                ...content,
+                uri: projectResourceUri(snapshot, route.entry.route.connectionKey, content.uri),
+              })),
+            };
+          },
+          extra?.signal,
+        ),
+      'Error reading resource',
+    ),
   );
 }

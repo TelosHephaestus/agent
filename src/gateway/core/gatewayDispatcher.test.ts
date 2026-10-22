@@ -1,6 +1,7 @@
 import { runtimeAdmission } from '@src/core/server/runtimeDrain.js';
+import { getOperationSnapshot, resetOperationJournalForTests } from '@src/observability/operations/operationJournal.js';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createEffectiveRequestAuthority,
@@ -11,6 +12,8 @@ import {
 } from '../contracts/index.js';
 import type { OutboundEraAdapter, OutboundGatewayRequest } from '../ports/index.js';
 import { GatewayDispatcher } from './gatewayDispatcher.js';
+
+afterEach(() => resetOperationJournalForTests());
 
 function adapter(pin: ProtocolEraPin, response: ImmutableJsonValue = { tools: [] }) {
   const requests: OutboundGatewayRequest[] = [];
@@ -64,6 +67,12 @@ describe('GatewayDispatcher', () => {
     expect(fixture.requests).toHaveLength(1);
     expect(fixture.requests[0].deadlineUnixMs).toBe(2_000);
     expect(Object.isFrozen(fixture.requests[0])).toBe(true);
+    expect(getOperationSnapshot({ limit: 200 }).operations.at(-1)).toMatchObject({
+      method: 'gateway/request',
+      profile: 'gateway',
+      callerOutcome: 'ok',
+      backendRequest: 'terminal_response_observed',
+    });
   });
 
   it('preserves capability lists larger than the default JSON budget', async () => {
@@ -101,6 +110,12 @@ describe('GatewayDispatcher', () => {
     const pending = dispatcher.dispatch(request(fixture.port.pin, { params: 'pending' }));
 
     await vi.waitFor(() => expect(fixture.requests).toHaveLength(1));
+    expect(getOperationSnapshot({ active: true }).operations).toHaveLength(1);
+    expect(getOperationSnapshot({ active: true }).operations[0]).toMatchObject({
+      method: 'gateway/request',
+      callerOutcome: null,
+      backendRequest: 'in_flight',
+    });
     await expect(dispatcher.cancel('request-1')).resolves.toBe(true);
     await expect(pending).resolves.toMatchObject({ ok: true });
     expect(fixture.cancellations).toEqual(['request-1']);

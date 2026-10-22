@@ -10,6 +10,7 @@ import {
   validateInteractionResponse,
 } from '@src/gateway/interactions/validateInteractionResponse.js';
 import type { GatewayInteractionRequest } from '@src/gateway/ports/outboundEraAdapter.js';
+import { currentOperation, updateOperation } from '@src/observability/operations/operationJournal.js';
 import { captureTraceContext, injectTraceContext, stripBaggage } from '@src/observability/tracing/context.js';
 import {
   hasNonInteractiveProfile,
@@ -39,6 +40,7 @@ interface Scope {
   readonly adapter: OutboundConnection['adapter'];
   readonly extra: Extra;
   readonly callbacks: { pending: number };
+  readonly operationId?: string;
   readonly runTrace: ReturnType<typeof captureTraceContext>;
   readonly abort: AbortController;
   readonly assertCurrent?: () => void;
@@ -193,6 +195,7 @@ export async function withRequestInteractionScope<T>(
               throw new McpError(-32000, 'interaction_capacity_exceeded');
             }
             scope.callbacks.pending++;
+            updateOperation(scope.operationId, { outstandingCallbacks: scope.callbacks.pending });
             try {
               const input = request as unknown as GatewayInteractionRequest;
               const binding = {
@@ -232,6 +235,7 @@ export async function withRequestInteractionScope<T>(
               return stripBaggage(response);
             } finally {
               scope.callbacks.pending--;
+              updateOperation(scope.operationId, { outstandingCallbacks: scope.callbacks.pending });
             }
           });
         } catch (error) {
@@ -255,6 +259,7 @@ export async function withRequestInteractionScope<T>(
           extra: scopedExtra,
           adapter: connection.adapter,
           callbacks: { pending: 0 },
+          operationId: currentOperation()?.operationId,
           runTrace: captureTraceContext(),
           abort,
           assertCurrent,

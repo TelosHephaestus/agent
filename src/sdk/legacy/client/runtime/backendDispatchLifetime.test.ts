@@ -4,6 +4,13 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { requestLegacyAdapter } from '@src/core/client/legacyAdapterRequest.js';
 import { runtimeAdmission } from '@src/core/server/runtimeDrain.js';
+import {
+  beginOperation,
+  finishOperation,
+  getOperation,
+  updateOperation,
+  withOperationContext,
+} from '@src/observability/operations/operationJournal.js';
 import { Client } from '@src/sdk/legacy/client/index.js';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -77,6 +84,33 @@ afterEach(() => {
 });
 
 describe('backend dispatch lifetime', () => {
+  it('does not finish a logical operation while another observed wire request is pending', async () => {
+    const transport: AuthProviderTransport = {
+      start: async () => {},
+      send: async () => {},
+      close: async () => {},
+    };
+    const id = beginOperation('tools/call');
+    if (!id) throw new Error('journal unexpectedly refused available test capacity');
+    const operation = getOperation(id);
+    if (!operation) throw new Error('journal did not retain the observed operation');
+    observeBackendDispatchLifetime(transport);
+    await withOperationContext(id, operation.sessionId, () =>
+      runtimeAdmission.run(async () => {
+        await transport.send({ jsonrpc: '2.0', id: 901, method: 'tools/list' });
+        await transport.send({ jsonrpc: '2.0', id: 902, method: 'tools/call' });
+      }),
+    );
+    transport.onmessage?.({ jsonrpc: '2.0', id: 901, result: {} });
+    updateOperation(id, { backendRequest: 'terminal_response_observed' });
+    finishOperation(id, 'cancelled');
+    expect(getOperation(id)).toMatchObject({ backendRequest: 'in_flight', callerOutcome: 'cancelled' });
+    expect(runtimeAdmission.snapshot().active).toBe(1);
+    transport.onmessage?.({ jsonrpc: '2.0', id: 902, result: {} });
+    expect(getOperation(id)?.backendRequest).toBe('terminal_response_observed');
+    expect(runtimeAdmission.snapshot().active).toBe(0);
+  });
+
   it.each([
     ['legacy', 'cancel'],
     ['legacy', 'timeout'],
@@ -132,12 +166,18 @@ describe('backend dispatch lifetime', () => {
       onmessage: receive,
     };
     const other: AuthProviderTransport = { start: async () => {}, send: async () => {}, close: async () => {} };
+    const operationId = beginOperation('tools/call', { session: 'operation-session' });
+    if (!operationId) throw new Error('journal unexpectedly refused available test capacity');
+    const sessionId = getOperation(operationId)?.sessionId;
+    if (!sessionId) throw new Error('journal did not retain the observed operation');
     observeBackendDispatchLifetime(transport);
     observeBackendDispatchLifetime(other);
-    await runtimeAdmission.run(async () => {
-      await transport.send({ jsonrpc: '2.0', id: 1, method: 'tools/call' });
-    });
-    expect(runtimeAdmission.snapshot().active).toBe(1);
+    await withOperationContext(operationId, sessionId, () =>
+      runtimeAdmission.run(async () => {
+        await transport.send({ jsonrpc: '2.0', id: 1, method: 'tools/call' });
+      }),
+    );
+    expect(getOperation(operationId)?.backendRequest).toBe('in_flight');
     other.onmessage?.({ jsonrpc: '2.0', id: 1, result: {} });
     transport.onclose?.();
     expect(runtimeAdmission.snapshot().active).toBe(1);
@@ -146,6 +186,8 @@ describe('backend dispatch lifetime', () => {
     observeBackendDispatchLifetime(transport);
     transport.onmessage?.({ jsonrpc: '2.0', id: 1, result: {} });
     expect(runtimeAdmission.snapshot().active).toBe(0);
+    expect(getOperation(operationId)?.backendRequest).toBe('terminal_response_observed');
+    finishOperation(operationId, 'cancelled');
     expect(reconnectedReceive).toHaveBeenCalledOnce();
     expect(receive).not.toHaveBeenCalled();
   });

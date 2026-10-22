@@ -4,6 +4,7 @@ import logger, * as loggerModule from '@src/logger/logger.js';
 import { acquireRuntimeCapabilityCatalog } from '@src/core/capabilities/runtimeCapabilityCatalog.js';
 import { SchemaBoundaryError } from '@src/core/validation/schemaBoundary.js';
 import type { LocalDiagnosticRecord } from '@src/logger/localDiagnostics.js';
+import { getOperationSnapshot, resetOperationJournalForTests } from '@src/observability/operations/operationJournal.js';
 import { ErrorCode, type JsonValue, type LegacySdkRequest, OneMcpProtocolError } from '@src/sdk/contracts/index.js';
 
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
@@ -43,9 +44,11 @@ describe('normal tool request local diagnostics', () => {
   let prepare: ReturnType<typeof vi.fn>;
   let records: LocalDiagnosticRecord[];
   let previousLevel: string;
+  let route: { kind: string; origin: string; server: string; upstreamIdentity: string; connectionKey: string };
 
   beforeEach(() => {
     records = [];
+    resetOperationJournalForTests();
     previousLevel = logger.level;
     logger.level = 'debug';
     vi.spyOn(loggerModule, 'writeLocalDiagnosticRecord').mockImplementation((record) => {
@@ -57,7 +60,7 @@ describe('normal tool request local diagnostics', () => {
     const connection = createMockOutboundConnection({ name: 'backend', requestTimeoutMs: 1500, adapter: { request } });
     validateOutput = Object.assign(vi.fn().mockResolvedValue(undefined), { assertCurrent: vi.fn() });
     prepare = vi.fn().mockResolvedValue(validateOutput);
-    const route = {
+    route = {
       kind: 'tools',
       origin: 'external',
       server: 'backend',
@@ -152,7 +155,24 @@ describe('normal tool request local diagnostics', () => {
     expect(details('tool.failed')).toEqual([
       expect.objectContaining({ phase: 'input_validation', outcome: 'validation_failed' }),
     ]);
+    expect(getOperationSnapshot().operations).toEqual([
+      expect.objectContaining({ backend: 'backend', backendRequest: 'not_dispatched' }),
+    ]);
   });
+
+  it.each(['tool_list', 'tool_schema', 'tool_invoke'])(
+    'records internal %s input rejection as a tool error without dispatch',
+    async (name) => {
+      Object.assign(route, { origin: 'internal', connectionKey: '\0app.1mcp/meta-tools', upstreamIdentity: name });
+      prepare.mockRejectedValueOnce(new SchemaBoundaryError('schema_input_invalid', false, 'input'));
+      const result = await call();
+      expect(result).toMatchObject({ isError: true, structuredContent: { error: { type: 'validation' } } });
+      expect(request).not.toHaveBeenCalled();
+      expect(getOperationSnapshot().operations).toEqual([
+        expect.objectContaining({ callerOutcome: 'tool_error', backendRequest: 'not_dispatched' }),
+      ]);
+    },
+  );
 
   it('records output validation failure after the backend returns', async () => {
     validateOutput.mockRejectedValueOnce(new SchemaBoundaryError('schema_output_invalid', false, 'output'));
