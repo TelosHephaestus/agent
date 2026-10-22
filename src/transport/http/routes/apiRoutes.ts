@@ -1,5 +1,6 @@
 import { RATE_LIMIT_CONFIG } from '@src/constants.js';
 import { ServerManager } from '@src/core/server/serverManager.js';
+import { getOperationExportStatus } from '@src/observability/operations/clioExporter.js';
 import { getOperation, getOperationSnapshot } from '@src/observability/operations/operationJournal.js';
 import tagsExtractor from '@src/transport/http/middlewares/tagsExtractor.js';
 
@@ -68,7 +69,10 @@ export function createObservabilityHandler(): RequestHandler {
       return;
     }
     res.setHeader('Cache-Control', 'no-store');
-    res.json(getOperationSnapshot({ active: activeValue === 'true', limit }));
+    res.json({
+      ...getOperationSnapshot({ active: activeValue === 'true', limit }),
+      export: getOperationExportStatus(),
+    });
   };
 }
 
