@@ -46,6 +46,7 @@ import {
 } from '@src/sdk/contracts/index.js';
 import { currentRequestProgress } from '@src/sdk/contracts/requestProgress.js';
 import { captureCapabilityListResult } from '@src/sdk/legacy/shared/capabilityListCapture.js';
+import { withHttpResponseFailure } from '@src/transport/httpResponseFailure.js';
 
 import { z } from 'zod';
 
@@ -393,9 +394,11 @@ export class ModernSdkClientAdapter implements LegacySdkAdapter {
         ...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
         ...(headers === undefined ? {} : { headers }),
       };
-      const result = isCapabilityListMethod(request.method)
-        ? await this.handles.client.request(message as never, capabilityListResultSchema, options)
-        : await this.handles.client.request(message as never, options);
+      const result = await withHttpResponseFailure(controller, () =>
+        isCapabilityListMethod(request.method)
+          ? this.handles.client.request(message as never, capabilityListResultSchema, options)
+          : this.handles.client.request(message as never, options),
+      );
       // The SDK has decoded the modern MRTR variant; complete Tool validation belongs after the broker's loop.
       if (
         this.protocol.era === 'modern' &&

@@ -35,6 +35,7 @@ import {
   ResultSchema,
   ToolListChangedNotificationSchema,
 } from '@src/sdk/legacy/types.js';
+import { withHttpResponseFailure } from '@src/transport/httpResponseFailure.js';
 
 import { observeBackendDispatchLifetime } from './backendDispatchLifetime.js';
 import { beginLegacyInteractionRequest, currentLegacyInteractionSignal } from './legacyInteractionLease.js';
@@ -181,14 +182,16 @@ export class LegacySdkClientAdapter implements LegacySdkAdapter {
     observeBackendDispatchLifetime(this.handles.transport);
     const params = injectTraceContext(request.params === undefined ? undefined : toJsonValue(request.params));
     try {
-      return await requestClient.request(
-        { method: request.method, ...(params === undefined ? {} : { params }) } as never,
-        ResultSchema,
-        {
-          signal: controller.signal,
-          onprogress: currentRequestProgress(),
-          ...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
-        },
+      return await withHttpResponseFailure(controller, () =>
+        requestClient.request(
+          { method: request.method, ...(params === undefined ? {} : { params }) } as never,
+          ResultSchema,
+          {
+            signal: controller.signal,
+            onprogress: currentRequestProgress(),
+            ...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
+          },
+        ),
       );
     } catch (error) {
       if (isPostAuthUnauthorized(error)) {

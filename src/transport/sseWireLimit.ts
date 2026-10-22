@@ -1,3 +1,5 @@
+import { currentHttpResponseFailure } from './httpResponseFailure.js';
+
 /** Limits bytes retained by the SSE parser before JSON parsing can allocate a message. */
 export const SSE_WIRE_LIMIT_BYTES = 8 * 1024 * 1024;
 
@@ -124,6 +126,8 @@ export function createSseWireLimitedFetch(
   let terminalError: SseWireLimitError | undefined;
   return async (input, init) => {
     if (terminalError) throw terminalError;
+    const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+    const failResponse = method.toUpperCase() === 'POST' ? currentHttpResponseFailure() : undefined;
     const response = await (fetchImpl ?? fetch)(input, init);
     if (
       !response.body ||
@@ -156,6 +160,7 @@ export function createSseWireLimitedFetch(
         } catch (error) {
           // Cancellation can take time; settle the body and transport immediately.
           void cleanup(error);
+          if (!(error instanceof SseWireLimitError)) failResponse?.();
           if (error instanceof SseWireLimitError && !terminalError) {
             terminalError = error;
             // Report the bounded reason to pending requests, then close before the
