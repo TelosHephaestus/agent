@@ -39,7 +39,7 @@ Unknown or expired IDs return a nonzero exit. Authentication, HTTP, malformed-re
 
 A terminal RPC response is not proof that external effects or detached business work ended. Cancellation alone does not prove backend termination. Pending callbacks and private closes remain visible after the caller finishes. Multiple tracked RPCs must all receive terminal evidence before their operation can settle.
 
-`summary.active` counts unfinished or uncertain observed operations. `summary.callerActive` counts pending caller handlers. `elapsedMs` measures the caller handler; `ageMs` keeps advancing while observed backend or private-close work remains unsettled and freezes when it settles. Counters accumulate for the current process; they are not rolling-window success rates. A new process has a new `instanceId` and no earlier in-memory records.
+`summary.active` counts unfinished or uncertain observed operations. `summary.callerActive` counts pending caller handlers. `elapsedMs` measures the caller handler. `ageMs` keeps advancing while the caller is pending or an observed backend request, callback, or private close remains unsettled. It freezes when the operation settles. Counters accumulate for the current process; they are not rolling-window success rates. A new process has a new `instanceId` and no earlier in-memory records.
 
 Coverage applies to the methods listed in `coverage.methods`: legacy tool calls, resource reads, prompt gets, completions, and gateway-dispatch operations. It does not claim every discovery request or notification is recorded. The existing household sampler supplies separate catalog and functional-read evidence. `coverage.complete` reports local observation loss, not backend health or confirmed historical export.
 

@@ -145,10 +145,10 @@ async function startGateway(t, { enableAuth = false, sinkOrigin } = {}) {
   const ready = await deadline(
     (async () => {
       while (gateway.exitCode === null) {
-        try {
-          const response = await fetch(`${url}/health/mcp`, { signal: AbortSignal.timeout(500) });
-          if (response.ok && (await response.json()).summary.ready === 1) return true;
-        } catch {}
+        const isReady = await fetch(`${url}/health/mcp`, { signal: AbortSignal.timeout(500) })
+          .then(async (response) => response.ok && (await response.json()).summary.ready === 1)
+          .catch(() => false);
+        if (isReady) return true;
         await new Promise((resolveWait) => setTimeout(resolveWait, 40));
       }
       throw new Error(
