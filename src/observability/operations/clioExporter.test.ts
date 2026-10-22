@@ -6,9 +6,9 @@ import * as journal from './operationJournal.js';
 import { getOperationExportStatus, startClioOperationExporter, stopClioOperationExporter } from './clioExporter.js';
 
 const env = {
-  ONE_MCP_OBSERVABILITY_OMPHALOS_URL: 'http://127.0.0.1:3000',
-  ONE_MCP_OBSERVABILITY_SERVICE: 'unit-test',
-  ONE_MCP_OBSERVABILITY_TIER: 'staging',
+  MCP_GATEWAY_OBSERVABILITY_OMPHALOS_URL: 'http://127.0.0.1:3000',
+  MCP_GATEWAY_OBSERVABILITY_SERVICE: 'unit-test',
+  MCP_GATEWAY_OBSERVABILITY_TIER: 'staging',
 };
 const emit = () => journal.finishOperation(journal.beginOperation('tools/call'), 'ok');
 const accepted = (count: number) => new Response(JSON.stringify({ status: 'ok', data: { status: 'accepted', count } }));
@@ -49,9 +49,9 @@ describe('Clio operation exporter', () => {
 
   it('stays disabled on incomplete, wrong-tier or non-origin configuration', () => {
     for (const invalid of [
-      { ...env, ONE_MCP_OBSERVABILITY_TIER: 'wrong' },
-      { ...env, ONE_MCP_OBSERVABILITY_OMPHALOS_URL: 'https://example.invalid/ignored-path' },
-      { ONE_MCP_OBSERVABILITY_TIER: 'staging' },
+      { ...env, MCP_GATEWAY_OBSERVABILITY_TIER: 'wrong' },
+      { ...env, MCP_GATEWAY_OBSERVABILITY_OMPHALOS_URL: 'https://example.invalid/ignored-path' },
+      { MCP_GATEWAY_OBSERVABILITY_TIER: 'staging' },
     ]) {
       startClioOperationExporter(invalid);
       expect(getOperationExportStatus()).toMatchObject({ enabled: false, queued: 0, lastFailure: 'invalid_config' });

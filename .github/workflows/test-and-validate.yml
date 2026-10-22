@@ -198,6 +198,12 @@ jobs:
       - name: Test request-local legacy concurrency
         run: node --test test/e2e/legacy-request-concurrency.test.mjs
 
+      - name: Test gateway operation observability
+        run: node --test test/e2e/gateway-observability.test.mjs
+        env:
+          GATEWAY_ENTRY: ${{ github.workspace }}/build/index.js
+          TMPDIR: ${{ runner.temp }}
+
       - name: Test background runtime E2E
         run: |
           started_at=$(date +%s)

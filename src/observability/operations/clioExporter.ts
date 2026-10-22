@@ -56,9 +56,9 @@ let lastAcceptedAt: string | null = null;
 let lastFailure: Failure | null = null;
 
 function validConfig(env: Readonly<Record<string, string | undefined>>): Config | undefined {
-  const url = env.ONE_MCP_OBSERVABILITY_OMPHALOS_URL;
-  const service = env.ONE_MCP_OBSERVABILITY_SERVICE;
-  const tier = env.ONE_MCP_OBSERVABILITY_TIER;
+  const url = env.MCP_GATEWAY_OBSERVABILITY_OMPHALOS_URL;
+  const service = env.MCP_GATEWAY_OBSERVABILITY_SERVICE;
+  const tier = env.MCP_GATEWAY_OBSERVABILITY_TIER;
   if (!url || !service || !/^[a-zA-Z0-9_.-]{1,96}$/.test(service)) return;
   if (tier !== 'production' && tier !== 'staging') return;
   try {
@@ -187,7 +187,9 @@ export function startClioOperationExporter(env: Readonly<Record<string, string |
   if (unsubscribe || timer) return;
   config = validConfig(env);
   if (!config) {
-    lastFailure = Object.keys(env).some((key) => key.startsWith('ONE_MCP_OBSERVABILITY_')) ? 'invalid_config' : null;
+    lastFailure = Object.keys(env).some((key) => key.startsWith('MCP_GATEWAY_OBSERVABILITY_'))
+      ? 'invalid_config'
+      : null;
     return;
   }
   lastFailure = null;
