@@ -1,5 +1,6 @@
 import { RATE_LIMIT_CONFIG } from '@src/constants.js';
 import { ServerManager } from '@src/core/server/serverManager.js';
+import { getOperation, getOperationSnapshot } from '@src/observability/operations/operationJournal.js';
 import tagsExtractor from '@src/transport/http/middlewares/tagsExtractor.js';
 
 import { NextFunction, Request, RequestHandler, Response, Router } from 'express';
@@ -49,6 +50,43 @@ export function rejectBrowserOriginRequests(req: Request, res: Response, next: N
   next();
 }
 
+export function createObservabilityHandler(): RequestHandler {
+  return (req, res) => {
+    const activeValue = req.query.active;
+    const limitValue = req.query.limit;
+    if (activeValue !== undefined && activeValue !== 'true' && activeValue !== 'false') {
+      res.status(400).json({ error: 'active must be true or false' });
+      return;
+    }
+    if (limitValue !== undefined && (typeof limitValue !== 'string' || !/^[1-9][0-9]*$/.test(limitValue))) {
+      res.status(400).json({ error: 'limit must be a positive integer' });
+      return;
+    }
+    const limit = limitValue === undefined ? 50 : Number(limitValue);
+    if (!Number.isSafeInteger(limit) || limit > 200) {
+      res.status(400).json({ error: 'limit must be between 1 and 200' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(getOperationSnapshot({ active: activeValue === 'true', limit }));
+  };
+}
+
+export function lookupOperation(id: string): { status: 200 | 404; body: unknown } {
+  const operation = getOperation(id);
+  if (!operation) return { status: 404, body: { schemaVersion: 1, unknown: true, id } };
+  const snapshot = getOperationSnapshot({ active: true, limit: 1 });
+  return { status: 200, body: { schemaVersion: 1, instanceId: snapshot.instanceId, operation } };
+}
+
+export function createOperationLookupHandler(): RequestHandler {
+  return (req, res) => {
+    const result = lookupOperation(req.params.id);
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(result.status).json(result.body);
+  };
+}
+
 export function createApiRoutes(
   serverManager: ServerManager,
   scopeAuthMiddleware: RequestHandler,
@@ -67,6 +105,8 @@ export function createApiRoutes(
   router.get('/instructions', tagsExtractor, scopeAuthMiddleware, createInstructionsHandler(serverManager));
   router.get('/servers', tagsExtractor, scopeAuthMiddleware, createServersHandler(serverManager));
   router.get('/tools', tagsExtractor, scopeAuthMiddleware, createToolsHandler(serverManager));
+  router.get('/observability', tagsExtractor, scopeAuthMiddleware, createObservabilityHandler());
+  router.get('/observability/operations/:id', tagsExtractor, scopeAuthMiddleware, createOperationLookupHandler());
   router.post(
     '/tool-invocations',
     rejectBrowserOriginRequests,

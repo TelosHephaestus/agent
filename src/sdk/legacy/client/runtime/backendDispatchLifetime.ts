@@ -1,4 +1,9 @@
 import { runtimeAdmission } from '@src/core/server/runtimeDrain.js';
+import {
+  currentOperation,
+  recordBackendRequestStarted,
+  recordBackendRequestTerminal,
+} from '@src/observability/operations/operationJournal.js';
 import type { JSONRPCMessage } from '@src/sdk/legacy/types.js';
 
 import type { AuthProviderTransport } from './legacyTransport.js';
@@ -6,21 +11,37 @@ import type { AuthProviderTransport } from './legacyTransport.js';
 type RequestId = string | number;
 interface DispatchObserver {
   readonly pending: Map<RequestId, (() => void) | null>;
+  readonly operationIds: Map<RequestId, string | null>;
   onmessage?: AuthProviderTransport['onmessage'];
 }
 const observers = new WeakMap<AuthProviderTransport, DispatchObserver>();
 
-function retainDispatch(pending: DispatchObserver['pending'], message: JSONRPCMessage): void {
+function retainDispatch(
+  pending: DispatchObserver['pending'],
+  operationIds: DispatchObserver['operationIds'],
+  message: JSONRPCMessage,
+): void {
   if (!('id' in message)) return;
   if (!('method' in message)) return;
   if (message.method === 'initialize' || message.method === 'ping') return;
   const release = runtimeAdmission.retain();
   if (!release) return;
   // Reusing a wire ID before completion makes its replies ambiguous. Fail closed.
-  pending.set(message.id, pending.has(message.id) ? null : release);
+  const reusedId = pending.has(message.id);
+  pending.set(message.id, reusedId ? null : release);
+  const operationId = currentOperation()?.operationId;
+  if (reusedId) operationIds.set(message.id, null);
+  else if (operationId) {
+    operationIds.set(message.id, operationId);
+    recordBackendRequestStarted(operationId);
+  }
 }
 
-function releaseDispatch(pending: DispatchObserver['pending'], message: JSONRPCMessage): void {
+function releaseDispatch(
+  pending: DispatchObserver['pending'],
+  operationIds: DispatchObserver['operationIds'],
+  message: JSONRPCMessage,
+): void {
   if (!('id' in message)) return;
   if (typeof message.id !== 'string' && typeof message.id !== 'number') return;
   if ('method' in message) return;
@@ -29,6 +50,9 @@ function releaseDispatch(pending: DispatchObserver['pending'], message: JSONRPCM
   if (!release) return;
   pending.delete(message.id);
   release();
+  const operationId = operationIds.get(message.id);
+  operationIds.delete(message.id);
+  if (operationId) recordBackendRequestTerminal(operationId);
 }
 
 /**
@@ -39,12 +63,13 @@ function releaseDispatch(pending: DispatchObserver['pending'], message: JSONRPCM
 export function observeBackendDispatchLifetime(transport: AuthProviderTransport): void {
   let observer = observers.get(transport);
   if (!observer) {
-    observer = { pending: new Map() };
+    observer = { pending: new Map(), operationIds: new Map() };
     observers.set(transport, observer);
     const pending = observer.pending;
+    const operationIds = observer.operationIds;
     const send = transport.send;
     transport.send = function (message, options) {
-      retainDispatch(pending, message);
+      retainDispatch(pending, operationIds, message);
       return send.call(this, message, options);
     };
   }
@@ -52,11 +77,12 @@ export function observeBackendDispatchLifetime(transport: AuthProviderTransport)
   if (transport.onmessage !== observer.onmessage || !observer.onmessage) {
     const receive = transport.onmessage;
     const pending = observer.pending;
+    const operationIds = observer.operationIds;
     observer.onmessage = (message, extra) => {
       try {
         receive?.(message, extra);
       } finally {
-        releaseDispatch(pending, message);
+        releaseDispatch(pending, operationIds, message);
       }
     };
     transport.onmessage = observer.onmessage;

@@ -13,6 +13,13 @@ import type { CatalogEntry } from '@src/core/capabilities/catalogGeneration.js';
 import { acquireRuntimeCapabilityCatalog } from '@src/core/capabilities/runtimeCapabilityCatalog.js';
 import { ClientStatus, type InboundConnection, type OutboundConnection } from '@src/core/types/index.js';
 import { InteractionOwner } from '@src/gateway/interactions/interactionOwner.js';
+import {
+  beginOperation,
+  finishOperation,
+  getOperation,
+  resetOperationJournalForTests,
+  withOperationContext,
+} from '@src/observability/operations/operationJournal.js';
 import type { LegacySdkEvent } from '@src/sdk/contracts/index.js';
 import { ClientFactory } from '@src/sdk/legacy/client/runtime/clientFactory.js';
 import { createLegacyOutboundConnection } from '@src/sdk/legacy/client/runtime/legacyOutboundConnection.js';
@@ -119,7 +126,42 @@ async function isolatedFixture(kind: 'prompts' | 'resources') {
 }
 
 describe('legacy operation interaction ownership', () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetOperationJournalForTests();
+  });
+
+  it('shows callback waits while pending and clears them after the owner receives a response', async () => {
+    const peer = fixture();
+    Object.assign(peer.connection.adapter, { protocol: { era: 'modern' } });
+    let completeCallback!: (value: unknown) => void;
+    let finishOperationScope!: () => void;
+    let callback!: () => Promise<unknown>;
+    vi.mocked(peer.extra.sendRequest).mockImplementation(() => new Promise((resolve) => (completeCallback = resolve)));
+    const operationId = beginOperation('tools/call', { session: 'callback-session' });
+    if (!operationId) throw new Error('journal unexpectedly refused available test capacity');
+    const sessionId = getOperation(operationId)?.sessionId;
+    if (!sessionId) throw new Error('journal did not retain the observed operation');
+    const scope = withOperationContext(operationId, sessionId, () =>
+      withRequestInteractionScope(peer.connection, peer.inbound, peer.extra, () => {
+        callback = AsyncLocalStorage.bind(() => handlers.get('roots/list')!({ method: 'roots/list' }));
+        return new Promise<void>((resolve) => (finishOperationScope = resolve));
+      }),
+    );
+    try {
+      const response = callback();
+      await vi.waitFor(() => expect(completeCallback).toBeTypeOf('function'));
+      expect(getOperation(operationId)?.outstandingCallbacks).toBe(1);
+      completeCallback({ roots: [{ uri: 'file:///callback' }] });
+      await expect(response).resolves.toEqual({ roots: [{ uri: 'file:///callback' }] });
+      expect(getOperation(operationId)?.outstandingCallbacks).toBe(0);
+    } finally {
+      completeCallback?.({ roots: [] });
+      finishOperationScope();
+      await scope;
+      finishOperation(operationId, 'ok');
+    }
+  });
 
   it('routes private notifications by caller and advertised capability and removes finished peers', async () => {
     const first = fixture();

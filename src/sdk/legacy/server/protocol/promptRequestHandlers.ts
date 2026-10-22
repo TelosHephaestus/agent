@@ -2,6 +2,7 @@ import { acquireRuntimeCapabilityCatalog } from '@src/core/capabilities/runtimeC
 import { getRequestSession, resolveCapabilityVisibility } from '@src/core/protocol/requestHandlerUtils.js';
 import { InboundConnection } from '@src/core/types/index.js';
 import { withSelectedNativeInputResponses } from '@src/gateway/interactions/nativeInputResponses.js';
+import { observeOperation } from '@src/observability/operations/operationJournal.js';
 import { RESPONSE_JSON_VALUE_LIMITS } from '@src/sdk/contracts/index.js';
 import {
   type LegacyOutboundConnections,
@@ -52,29 +53,41 @@ export function registerPromptHandlers(outboundConns: LegacyOutboundConnections,
   );
   server.setRequestHandler(
     GetPromptRequestSchema,
-    withErrorHandling(async (request, extra) => {
-      const route = (await acquire()).resolve('prompts', request.params.name);
-      if (!route?.connection) throw new Error(`Unknown prompt: ${request.params.name}`);
-      const { _meta: _callerMeta, ...params } = request.params;
-      return withProviderRequestProgress(
-        outboundConns,
-        route.connection,
-        route.entry,
-        extra,
-        request.params._meta?.progressToken,
-        () =>
-          withPrivateInteractionConnection(route.connection!, inboundConn, extra, route.entry, (selected) =>
-            withSelectedNativeInputResponses(
-              request.params.name,
-              'prompts/get',
-              selected.adapter,
-              route.entry.route.upstreamIdentity,
+    withErrorHandling(
+      (request, extra) =>
+        observeOperation(
+          'prompts/get',
+          getRequestSession(inboundConn),
+          async () => {
+            const route = (await acquire()).resolve('prompts', request.params.name);
+            if (!route?.connection) throw new Error(`Unknown prompt: ${request.params.name}`);
+            const { _meta: _callerMeta, ...params } = request.params;
+            return withProviderRequestProgress(
+              outboundConns,
+              route.connection,
+              route.entry,
+              extra,
+              request.params._meta?.progressToken,
               () =>
-                requestLegacyOutbound(selected, 'prompts/get', { ...params, name: route.entry.route.upstreamIdentity }),
-            ),
-          ),
-      );
-    }, 'Error getting prompt'),
+                withPrivateInteractionConnection(route.connection!, inboundConn, extra, route.entry, (selected) =>
+                  withSelectedNativeInputResponses(
+                    request.params.name,
+                    'prompts/get',
+                    selected.adapter,
+                    route.entry.route.upstreamIdentity,
+                    () =>
+                      requestLegacyOutbound(selected, 'prompts/get', {
+                        ...params,
+                        name: route.entry.route.upstreamIdentity,
+                      }),
+                  ),
+                ),
+            );
+          },
+          extra?.signal,
+        ),
+      'Error getting prompt',
+    ),
   );
 }
 
@@ -84,29 +97,38 @@ export function registerCompletionHandlers(
 ): void {
   getLegacyInboundServer(inboundConn).setRequestHandler(
     CompleteRequestSchema,
-    withErrorHandling(async (request) => {
-      const ref = request.params.ref;
-      const prompt = ref.type === 'ref/prompt';
-      const snapshot = await acquireRuntimeCapabilityCatalog(
-        outboundConns,
-        resolveCapabilityVisibility(
-          outboundConns,
-          inboundConn,
+    withErrorHandling(
+      (request, extra) =>
+        observeOperation(
+          'completion/complete',
           getRequestSession(inboundConn),
-          prompt ? 'prompts' : 'resources',
+          async () => {
+            const ref = request.params.ref;
+            const prompt = ref.type === 'ref/prompt';
+            const snapshot = await acquireRuntimeCapabilityCatalog(
+              outboundConns,
+              resolveCapabilityVisibility(
+                outboundConns,
+                inboundConn,
+                getRequestSession(inboundConn),
+                prompt ? 'prompts' : 'resources',
+              ),
+            );
+            const identity = prompt ? ref.name : ref.uri;
+            const route =
+              snapshot.resolve(prompt ? 'prompts' : 'resourceTemplates', identity) ??
+              (!prompt ? snapshot.resolve('resources', identity) : undefined);
+            if (!route?.connection) throw new Error(`Unknown completion reference: ${identity}`);
+            return requestLegacyOutbound(route.connection, 'completion/complete', {
+              ...request.params,
+              ref: prompt
+                ? { ...ref, name: route.entry.route.upstreamIdentity }
+                : { ...ref, uri: route.entry.route.upstreamIdentity },
+            });
+          },
+          extra?.signal,
         ),
-      );
-      const identity = prompt ? ref.name : ref.uri;
-      const route =
-        snapshot.resolve(prompt ? 'prompts' : 'resourceTemplates', identity) ??
-        (!prompt ? snapshot.resolve('resources', identity) : undefined);
-      if (!route?.connection) throw new Error(`Unknown completion reference: ${identity}`);
-      return requestLegacyOutbound(route.connection, 'completion/complete', {
-        ...request.params,
-        ref: prompt
-          ? { ...ref, name: route.entry.route.upstreamIdentity }
-          : { ...ref, uri: route.entry.route.upstreamIdentity },
-      });
-    }, 'Error handling completion'),
+      'Error handling completion',
+    ),
   );
 }

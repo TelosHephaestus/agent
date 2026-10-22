@@ -12,6 +12,7 @@ import { ClientStatus, type InboundConnection, type OutboundConnection } from '@
 import { captureJson } from '@src/core/validation/schemaPolicy.js';
 import { hasInteractionCapability } from '@src/gateway/interactions/interactionCapabilities.js';
 import { withDerivedInteractionRoute } from '@src/gateway/interactions/interactionRoute.js';
+import { currentOperation, updateOperation } from '@src/observability/operations/operationJournal.js';
 import { ClientFactory } from '@src/sdk/legacy/client/runtime/clientFactory.js';
 import { hasNonInteractiveProfile } from '@src/sdk/legacy/client/runtime/legacyInteractionLease.js';
 import {
@@ -55,6 +56,7 @@ export async function withPrivateInteractionConnection<T>(
     if (!isIssuedRuntimeResourceEntry(entry)) throw new McpError(-32000, 'interaction_lost');
     if (!assertCurrent) throw new McpError(-32000, 'interaction_lost');
   }
+  const operationId = currentOperation()?.operationId;
   const adapter = source.adapter;
   const observed = new Map([[entry.route.connectionKey, source]]);
   registerCapabilityPaginationNotifications(observed, source);
@@ -79,6 +81,7 @@ export async function withPrivateInteractionConnection<T>(
       operation,
       assertProviderCurrent,
       issuedResourceRead,
+      operationId,
     );
   } finally {
     unregisterCapabilityPaginationConnections(observed);
@@ -94,6 +97,7 @@ async function withSelectedInteractionConnection<T>(
   operation: (connection: OutboundConnection) => Promise<T>,
   assertCurrent: () => void,
   issuedResourceRead?: CatalogEntry,
+  operationId?: string,
 ): Promise<T> {
   if (source.adapter.protocol?.era === 'modern') {
     return withRequestInteractionScope(source, inbound, extra, () => operation(source), undefined, assertCurrent);
@@ -113,6 +117,7 @@ async function withSelectedInteractionConnection<T>(
   if (active >= capacity) throw new McpError(-32000, 'interaction_capacity_exceeded');
   extra.signal.throwIfAborted();
   active++;
+  updateOperation(operationId, { privateConnections: 1 });
   let transport: AuthProviderTransport | undefined;
   let child: OutboundConnection | undefined;
   let removeAbort: () => void = () => undefined;
@@ -196,6 +201,7 @@ async function withSelectedInteractionConnection<T>(
     void closing.then(
       () => {
         active--;
+        updateOperation(operationId, { privateConnections: 0 });
       },
       () => undefined,
     );

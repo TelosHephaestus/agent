@@ -1,4 +1,11 @@
 import { runtimeAdmission, RuntimeDrainingError } from '@src/core/server/runtimeDrain.js';
+import {
+  beginOperation,
+  finishOperation,
+  getOperation,
+  updateOperation,
+  withOperationContext,
+} from '@src/observability/operations/operationJournal.js';
 import { isCapabilityListMethod, RESPONSE_JSON_VALUE_LIMITS } from '@src/sdk/contracts/index.js';
 
 import { z } from 'zod';
@@ -41,6 +48,31 @@ export class GatewayDispatcher {
   }
 
   async dispatch(request: GatewayRequestEnvelope): Promise<GatewayResult<ImmutableJsonValue>> {
+    const operationId = beginOperation('gateway/request', {
+      profile: 'gateway',
+      backend: request.targetConnectionId,
+    });
+    const sessionId = operationId ? (getOperation(operationId)?.sessionId ?? '') : '';
+    return withOperationContext(operationId ?? '', sessionId, async () => {
+      try {
+        updateOperation(operationId, { stage: 'routing' });
+        const result = await this.dispatchObserved(request, operationId);
+        finishOperation(
+          operationId,
+          result.ok ? 'ok' : result.failure.kind === 'deadline-exceeded' ? 'timeout' : 'failed',
+        );
+        return result;
+      } catch (error) {
+        finishOperation(operationId, 'failed');
+        throw error;
+      }
+    });
+  }
+
+  private async dispatchObserved(
+    request: GatewayRequestEnvelope,
+    operationId: string | undefined,
+  ): Promise<GatewayResult<ImmutableJsonValue>> {
     if (this.active.has(request.requestId) || this.dispatched.has(request)) {
       return gatewayFailure(
         createGatewayFailure({
@@ -107,7 +139,7 @@ export class GatewayDispatcher {
       deadlineUnixMs: request.deadlineUnixMs,
     });
     try {
-      return await runtimeAdmission.run(() => this.dispatchAdmitted(request, outbound, outboundRequest));
+      return await runtimeAdmission.run(() => this.dispatchAdmitted(request, outbound, outboundRequest, operationId));
     } catch (error) {
       if (!(error instanceof RuntimeDrainingError)) throw error;
       return gatewayFailure(
@@ -120,15 +152,22 @@ export class GatewayDispatcher {
     request: GatewayRequestEnvelope,
     outbound: OutboundEraAdapter,
     outboundRequest: OutboundGatewayRequest,
+    operationId: string | undefined,
   ): Promise<GatewayResult<ImmutableJsonValue>> {
     this.active.set(request.requestId, outbound);
     this.dispatched.add(request);
+    let terminalResponseObserved = false;
     try {
       const resultLimits =
         outbound.resultLimits ??
         (isCapabilityListMethod(outboundRequest.operation) ? RESPONSE_JSON_VALUE_LIMITS : undefined);
-      return gatewaySuccess(toImmutableJsonValue(await outbound.request(outboundRequest), resultLimits));
+      updateOperation(operationId, { stage: 'dispatch', backendRequest: 'in_flight' });
+      const response = await outbound.request(outboundRequest);
+      terminalResponseObserved = true;
+      updateOperation(operationId, { backendRequest: 'terminal_response_observed' });
+      return gatewaySuccess(toImmutableJsonValue(response, resultLimits));
     } catch (error) {
+      if (!terminalResponseObserved) updateOperation(operationId, { backendRequest: 'unknown' });
       const failure = gatewayFailureFromUnknown(error, 'transport');
       return gatewayFailure(
         request.operation === 'tools/call' && failure.kind === 'transport'
